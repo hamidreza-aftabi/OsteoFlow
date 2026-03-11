@@ -1,0 +1,14 @@
+# Core
+numpy
+pandas
+matplotlib
+scipy
+nibabel
+
+# Training
+torch
+
+# Progress / IO helpers
+tqdm
+openpyxl
+xlsxwriter
