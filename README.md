@@ -90,9 +90,9 @@ LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
 
 - MedVAE: We fine-tuned the released checkpoint from [MedVAE](https://github.com/StanfordMIMI/MedVAE) using `medvae_4x_1c_3d_finetuning` for CT modality in two versions: v1 used the MedVAE-recommended loss setup (LPIPS + PatchGAN), and v2 used our resection-aware loss (Eq. 5 in our paper).
 - cDDPM($\Delta$): We used a [MONAI](https://project-monai.github.io/)-based conditional DDPM that is conditioned on POD5, trained to predict the difference target $\Delta=\mathrm{POY1}-\mathrm{POD5}$, and sampled with DDIM inference to reconstruct the final POY1 CT.
-- Pix2Pix-3D: We followed [pix2pix](https://github.com/phillipi/pix2pix) and adapted it to 3D ROI translation (POD5$\rightarrow$POY1) with a 3D ResUNet generator and 3D PatchGAN discriminator, trained with adversarial BCE losses and an L_1 reconstruction term.
+- Pix2Pix-3D: We followed [pix2pix](https://github.com/phillipi/pix2pix) and adapted it to 3D ROI translation (POD5$\rightarrow$POY1) with a 3D ResUNet generator and 3D PatchGAN discriminator, trained with adversarial BCE losses and an $L_1$ reconstruction term.
 - GRIT-3D (adapted): Since official code was not publicly available, we followed the GRIT paper/project page ([cs.umd.edu/~sakshams/grit](https://www.cs.umd.edu/~sakshams/grit/)) and implemented a 3D adaptation; this is not a strict reproduction of original GRIT, because our version uses a reconstruction-plus-residual decomposition for GAN training but does not include the original style encoder pathway.
-- SegGuidedDiff-3D (adapted): We followed [Segmentation-Guided Diffusion](https://github.com/mazurowski-lab/segmentation-guided-diffusion) and adapted it to our 3D POD5 to POY1 setting, where diffusion is guided by a Day-5 bone mask (derived from POD5) through concatenation-based guidance.
+- SegGuidedDiff-3D (adapted): We followed [Segmentation-Guided Diffusion](https://github.com/mazurowski-lab/segmentation-guided-diffusion) and adapted it to our 3D POD5$ to $POY1 setting, where diffusion is guided by a Day-5 bone mask (derived from POD5) through concatenation-based guidance.
 - Rectified Flow (RecFlow): We followed [RectifiedFlow](https://github.com/gnobitab/RectifiedFlow), which is also the methodological foundation of our own OsteoFlow model.
 
 ## Data and Checkpoints
@@ -110,13 +110,16 @@ The dataset used in this study is internal and cannot be publicly distributed. I
 
 ## Citation
 
-If you use this repository in your research, please cite the corresponding paper once available.
+If you use this repository in your research, please cite:
+
+[OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction (arXiv:2603.22421)](https://arxiv.org/abs/2603.22421)
 
 ```bibtex
-@article{osteoflow2026,
+@article{aftabi2026osteoflow,
   title={OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction},
-  author={Aftabi et al.},
-  journal={arXiv},
-  year={2026}
+  author={Aftabi, Hamidreza and Yu, Faye and Switzer, Brooke and Fishman, Zachary and Prisman, Eitan and Hodgson, Antony and Whyne, Cari and Fels, Sidney},
+  journal={arXiv preprint arXiv:2603.22421},
+  year={2026},
+  doi={10.48550/arXiv.2603.22421}
 }
 ```
