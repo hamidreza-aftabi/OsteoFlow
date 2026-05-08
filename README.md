@@ -1,49 +1,49 @@
 # OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction
 
-OsteoFlow is a teacher–student framework for predicting Year-1 post-operative CT from Day-5 CT after mandibular reconstruction. It combines diffeomorphic registration and rectified flow modeling to learn bone remodeling at the graft–host interface. During training, a registration-based teacher provides trajectory supervision, while the student learns an image-space transport field with Lyapunov regularization. At inference time, only the student model is used.
+[![arXiv](https://img.shields.io/badge/arXiv-2603.22421-b31b1b.svg)](https://arxiv.org/abs/2603.22421)
+[![arXiv version](https://img.shields.io/badge/arXiv%20version-v1-b31b1b.svg)](https://arxiv.org/abs/2603.22421v1)
+[![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.x-3776AB.svg)](requirements.txt)
+[![PyTorch](https://img.shields.io/badge/PyTorch-required-EE4C2C.svg)](requirements.txt)
 
-## Table of Contents
+OsteoFlow is a teacher-student framework for predicting Year-1 post-operative
+CT from Day-5 CT after mandibular reconstruction. It combines diffeomorphic
+registration and rectified flow modeling to learn bone remodeling at the
+graft-host interface. During training, a registration-based teacher provides
+trajectory supervision, while the student learns an image-space transport field
+with Lyapunov regularization. At inference time, only the student model is used.
 
-- [Method Overview](#method-overview)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Repository Structure](#repository-structure)
-- [Configurable Parameters](#configurable-parameters)
-- [Model Input and Resolution](#model-input-and-resolution)
-- [Baseline Implementation Details](#baseline-implementation-details)
-- [Data and Checkpoints](#data-and-checkpoints)
-- [Reproducibility Notes](#reproducibility-notes)
-- [Citation](#citation)
+Publication: [OsteoFlow on ResearchGate](https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction).
+
+## Repository Layout
+
+- `code/` - teacher and student OsteoFlow training scripts.
+- `assets/` - README figures.
+- `requirements.txt` - Python dependencies.
 
 ## Method Overview
 
-The framework has two stages:
-
-- **Teacher:** diffeomorphic registration with stationary velocity fields (SVF) to generate supervision trajectories
-- **Student:** rectified flow trained with teacher guidance and Lyapunov regularization
-
-Only the student is needed at test time.
-
-## Model Input and Resolution
-
-- Input volume size: 48 x 48 x 48 ROI patch
-- Input/output channels (student): 1 channel CT volume
-- Intensity normalization: HU clipped to [-100, 1100] and mapped to [-1, 1]
-- Student UNet spatial path: 48 -> 24 -> 12 in the encoder, then 12 -> 24 -> 48 in the decoder
-- Downsampling steps: 2 stride-2 downsampling stages
-- Inference integration: one-step update or multi-step ODE integration (Euler/Heun/RK4)
-
-### Framework
 ![Method overview](assets/method.png)
 
-Overview of the preprocessing pipeline and teacher–student distillation framework used to guide the student velocity field.
+OsteoFlow has two stages:
 
-### Qualitative Results
+- **Teacher:** diffeomorphic registration with stationary velocity fields
+  (SVF) to generate trajectory supervision.
+- **Student:** rectified flow trained with teacher guidance and Lyapunov
+  regularization.
+
+Only the student model is needed at test time.
+
+## Results Preview
+
 ![Qualitative results](assets/results.png)
 
-Representative predictions for union, partial union, and nonunion cases, shown on the resection plane and orthogonal central slices.
+Representative predictions for union, partial union, and nonunion cases are
+shown on the resection plane and orthogonal central slices.
 
-## Installation
+## Setup
+
+Create a Python environment and install the required packages:
 
 ```bash
 pip install -r requirements.txt
@@ -54,82 +54,92 @@ pip install -r requirements.txt
 Run the teacher model:
 
 ```bash
-python Code/OsteoFlow_Teacher_V0.py
+python code/OsteoFlow_Teacher_V0.py
 ```
 
 Run the student model:
 
 ```bash
-python Code/OsteoFlow_Student_V0.py
+python code/OsteoFlow_Student_V0.py
 ```
 
-## Repository Structure
+## Model Input and Resolution
 
-```text
-OsteoFlow/
-├── README.md
-├── requirements.txt
-├── Code/
-│   ├── OsteoFlow_Teacher_V0.py
-│   └── OsteoFlow_Student_V0.py
-└── assets/
-    ├── method.png
-    └── results.png
-```
+- Input volume size: `48 x 48 x 48` ROI patch.
+- Input/output channels: one CT volume channel.
+- Intensity normalization: HU clipped to `[-100, 1100]` and mapped to `[-1, 1]`.
+- Student UNet spatial path: `48 -> 24 -> 12 -> 24 -> 48`.
+- Inference integration: one-step update or multi-step ODE integration
+  (`Euler`, `Heun`, or `RK4`).
 
 ## Configurable Parameters
 
-Some parameters and flags can be changed in the code.
+`LOSS_MODE` controls the training objective:
 
-In particular, `LOSS_MODE` controls the training setup:
-
-- `fm_only` — rectified flow only
-- `lqr_only` — Lyapunov-guided teacher only
-- `both` — joint training
+- `fm_only` - rectified flow only.
+- `lqr_only` - Lyapunov-guided teacher only.
+- `both` - joint training.
 
 ```python
-# The parameters and flags in this code can be adjusted depending on the training setup.
-# LOSS_MODE controls which supervision is used:
-#   'fm_only'  -> rectified flow only
-#   'lqr_only' -> Lyapunov-guided teacher only
-#   'both'     -> joint training
 LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
 ```
 
-## Baseline Implementation Details
+## Baseline Implementation Notes
 
-- MedVAE-3D: We fine-tuned the released checkpoint from [MedVAE](https://github.com/StanfordMIMI/MedVAE) using `medvae_4x_1c_3d_finetuning` for CT modality in two versions: v1 used the MedVAE-recommended loss setup (LPIPS + PatchGAN), and v2 used our resection-aware loss (Eq. 5 in our paper).
-- cDDPM($\Delta$)-3D: We used a [MONAI](https://project-monai.github.io/)-based conditional DDPM that is conditioned on POD5, trained to predict the difference target $\Delta=\mathrm{POY1}-\mathrm{POD5}$, and sampled with DDIM inference to reconstruct the final POY1 CT.
-- Pix2Pix-3D: We followed [pix2pix](https://github.com/phillipi/pix2pix) and adapted it to 3D ROI translation (POD5 to POY1) with a 3D ResUNet generator and 3D PatchGAN discriminator, trained with adversarial BCE losses and an $L_1$ reconstruction term.
-- GRIT-3D (adapted): Since official code was not publicly available, we followed the GRIT paper/project page ([cs.umd.edu/~sakshams/grit](https://www.cs.umd.edu/~sakshams/grit/)) and implemented a 3D adaptation; this is not a strict reproduction of original GRIT, because our version uses a reconstruction-plus-residual decomposition for GAN training but does not include the original style encoder pathway.
-- SegGuidedDiff-3D (adapted): We followed [Segmentation-Guided Diffusion](https://github.com/mazurowski-lab/segmentation-guided-diffusion) and adapted it to our 3D POD5 to POY1 setting, where diffusion is guided by a Day-5 bone mask (derived from POD5) through concatenation-based guidance.
-- Rectified Flow (RecFlow): We followed [RectifiedFlow](https://github.com/gnobitab/RectifiedFlow), which is also the methodological foundation of our own OsteoFlow model.
+- Baselines follow the same ROI-level split rule: augmented units for training
+  and `aug0`-only units for testing.
+- **MedVAE-3D:** Fine-tuned from the released
+  [MedVAE](https://github.com/StanfordMIMI/MedVAE) `medvae_4x_1c_3d_finetuning`
+  checkpoint for CT modality using the MedVAE-recommended loss setup
+  (`L1 + LPIPS + PatchGAN`); a resection-aware loss ablation was also tested.
+- **cDDPM(delta)-3D:** MONAI-based conditional DDPM conditioned on POD5,
+  trained to predict `Delta = POY1 - POD5`, and sampled with DDIM inference.
+- **Pix2Pix-3D:** 3D POD5-to-POY1 ROI translation adapted from
+  [pix2pix](https://github.com/phillipi/pix2pix), with a 3D ResUNet generator,
+  3D PatchGAN discriminator, adversarial BCE loss, and `L1` reconstruction.
+- **GRIT-3D adapted:** 3D adaptation based on the GRIT paper/project page; this
+  is not a strict reproduction because the official code was unavailable and
+  the adaptation uses reconstruction-plus-residual GAN training without the
+  original style encoder pathway.
+- **SegGuidedDiff-3D adapted:** 3D POD5-to-POY1 diffusion guided by a Day-5
+  bone mask derived from POD5 through concatenation-based guidance; the same
+  ablation mask was applied using the Day-5-derived mask.
+- **Rectified Flow:** Based on
+  [RectifiedFlow](https://github.com/gnobitab/RectifiedFlow), which also
+  underlies the OsteoFlow student formulation.
+
+## Reproducibility Notes
+
+- Keep configured directory names consistent under `BASE_DIR`.
+- The teacher is used only during training; inference uses the student alone.
 
 ## Data and Checkpoints
 
 Pretrained checkpoints will be released in this repository.
 
-The dataset used in this study is internal and cannot be publicly distributed. In the case of acceptance, access requests may be directed to the corresponding author.
-
-## Reproducibility Notes
-
-- Keep directory names consistent under `BASE_DIR` if paths are modified.
-- The teacher is used only during training.
-- Inference uses the student model alone.
-- Baseline scripts follow the same ROI-level split rule (augmented units for train, aug0-only units for test) to avoid leakage.
+The dataset used in this study is internal and cannot be publicly distributed.
+Access requests may be directed to the corresponding author.
 
 ## Citation
 
-If you use this repository in your research, please cite:
-
-[OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction (arXiv:2603.22421)](https://arxiv.org/abs/2603.22421)
+If you use OsteoFlow, please cite:
 
 ```bibtex
-@article{aftabi2026osteoflow,
-  title={OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction},
-  author={Aftabi, Hamidreza and Yu, Faye and Switzer, Brooke and Fishman, Zachary and Prisman, Eitan and Hodgson, Antony and Whyne, Cari and Fels, Sidney},
-  journal={arXiv preprint arXiv:2603.22421},
-  year={2026},
-  doi={10.48550/arXiv.2603.22421}
+@misc{aftabi2026osteoflow,
+  title = {OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction},
+  author = {Aftabi, Hamidreza and Yu, Faye and Switzer, Brooke and Fishman, Zachary and Prisman, Eitan and Hodgson, Antony and Whyne, Cari and Fels, Sidney and Hardisty, Michael},
+  year = {2026},
+  eprint = {2603.22421},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CV},
+  doi = {10.48550/arXiv.2603.22421},
+  url = {https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction}
 }
 ```
+
+## License
+
+OsteoFlow is source-available for noncommercial research and educational use
+under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use
+requires separate written permission from the authors. See [NOTICE](NOTICE) for
+the required copyright notice.

@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use OsteoFlow, please cite the arXiv paper."
+title: "OsteoFlow"
+type: software
+authors:
+  - family-names: Aftabi
+    given-names: Hamidreza
+  - family-names: Yu
+    given-names: Faye
+  - family-names: Switzer
+    given-names: Brooke
+  - family-names: Fishman
+    given-names: Zachary
+  - family-names: Prisman
+    given-names: Eitan
+  - family-names: Hodgson
+    given-names: Antony
+  - family-names: Whyne
+    given-names: Cari
+  - family-names: Fels
+    given-names: Sidney
+  - family-names: Hardisty
+    given-names: Michael
+repository-code: "https://github.com/hamidreza-aftabi/OsteoFlow"
+url: "https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction"
+date-released: "2026-03-23"
+license: "PolyForm-Noncommercial-1.0.0"
+preferred-citation:
+  type: article
+  title: "OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction"
+  authors:
+    - family-names: Aftabi
+      given-names: Hamidreza
+    - family-names: Yu
+      given-names: Faye
+    - family-names: Switzer
+      given-names: Brooke
+    - family-names: Fishman
+      given-names: Zachary
+    - family-names: Prisman
+      given-names: Eitan
+    - family-names: Hodgson
+      given-names: Antony
+    - family-names: Whyne
+      given-names: Cari
+    - family-names: Fels
+      given-names: Sidney
+    - family-names: Hardisty
+      given-names: Michael
+  journal: "arXiv preprint arXiv:2603.22421"
+  date-published: "2026-03-23"
+  doi: "10.48550/arXiv.2603.22421"
+  url: "https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction"
