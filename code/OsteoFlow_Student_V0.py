@@ -102,7 +102,7 @@ EXCLUDE_PLATE_FROM_METRICS = False
 # Train/Test Split
 SPLIT_BY_PATIENT = True  # True: by patient, False: by ROI
 TRAIN_SPLIT = 0.85
-TEST_SPLIT = 0
+TEST_SPLIT = 0.15
 RANDOM_SEED = 123
 
 # Semi-online augmentation
@@ -113,7 +113,7 @@ NUM_AUG_PER_ROI = 40
 # Image Space Loss
 USE_IMAGE_SPACE_LOSS = True
 USE_IMG_LOSS_BONE_WEIGHTED = True
-IMAGE_SPACE_LOSS_WEIGHT = 1.0
+IMAGE_SPACE_LOSS_WEIGHT = .2
 IMAGE_SPACE_LOSS_FREQ = 1
 
 # Bone-weighted loss
@@ -138,7 +138,7 @@ MIDDLE_SLAB_FALLOFF = 5.0
 LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
 
 # FM loss weight decay schedule
-FM_LOSS_DECAY_ENABLE = True
+FM_LOSS_DECAY_ENABLE = False
 FM_LOSS_DECAY_START_EPOCH = 10
 FM_LOSS_DECAY_END_EPOCH = 15
 FM_LOSS_DECAY_SHAPE = 'linear'  # 'linear' | 'cosine'
