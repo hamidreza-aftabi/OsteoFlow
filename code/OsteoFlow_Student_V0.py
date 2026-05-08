@@ -112,18 +112,9 @@ NUM_AUG_PER_ROI = 40
 
 # Image Space Loss
 USE_IMAGE_SPACE_LOSS = True
-USE_IMG_LOSS_BONE_WEIGHTED = True
 IMAGE_SPACE_LOSS_WEIGHT = .2
 IMAGE_SPACE_LOSS_FREQ = 1
-
-# Bone-weighted loss
-BONE_LOSS_LAMBDA = 10.0
-BONE_WEIGHT_ALPHA = 1.0
-BONE_SURFACE_WEIGHT = 0.5
-
-# ================= FM Resection Plane Weighting =================
-FM_RESECTION_PLANE_CONSTRAINT = True
-FM_RESECTION_PLANE_SIGMA = 30.0
+IMAGE_SPACE_WEIGHT_SIGMA = 30.0
 
 # ================= Middle-Slab Prior Channel =================
 USE_MIDDLE_SLAB_PRIOR_CHANNEL = True
@@ -150,7 +141,7 @@ LYAPUNOV_LAMBDA_MAX = 1.0
 LYAPUNOV_WARMUP_EPOCHS = 10
 LYAPUNOV_DT = 0.05
 LYAPUNOV_DT_MIN = LYAPUNOV_DT
-LYAPUNOV_TEACHER_TANGENT_SCHEME = 'forward'  # 'forward' | 'centered' | 'forward2'
+LYAPUNOV_TEACHER_TANGENT_SCHEME = 'forward2'  # 'forward' | 'centered' | 'forward2'
 LYAPUNOV_TERMINAL_FADE_START = 0.75
 
 # Student init from SVF teacher
@@ -163,7 +154,7 @@ LYAPUNOV_ON_POLICY_TRAINING = True
 LYAPUNOV_ON_POLICY_PROB = 1.0
 LYAPUNOV_ON_POLICY_STEPS = 8
 
-LYAPUNOV_R_INV = 1.0  # Legacy compat
+LYAPUNOV_R_INV = 1.0  # scalar-output compatibility parameter
 
 # SVF Teacher
 LYAPUNOV_SVF_TEACHER_CHECKPOINT = BASE_DIR / "Results" / "teacher_123_m100_1100_SVF_final.pth"
@@ -329,13 +320,8 @@ def velocity_scale_agreement_01(
     return torch.minimum(r, r_inv)
 
 
-def fm_create_resection_plane_mask(shape: tuple, sigma: float, device: torch.device | None = None) -> torch.Tensor:
-    """FM training loss mask: smooth exp falloff along W axis.
-
-    Weight formula (along W axis): w(n) = exp(-((n - center)/sigma)^2)
-    where center = W/2.
-
-    Hard-band (binary) option uses threshold tau=exp(-1) (≈0.3679).
+def _gaussian_resection_weight(shape: tuple, sigma: float, device: torch.device | None = None) -> torch.Tensor:
+    """Smooth Gaussian weight along the image W axis.
 
     Args:
         shape: (D,H,W) or (B,C,D,H,W)
@@ -350,16 +336,19 @@ def fm_create_resection_plane_mask(shape: tuple, sigma: float, device: torch.dev
         D, H, W = shape
         B, C = 1, 1
     else:
-        raise ValueError(f"Unexpected shape for FM resection plane mask: {shape}")
+        raise ValueError(f"Unexpected shape for Gaussian resection weight: {shape}")
 
     sigma = max(float(sigma), 0.1)
-    center_n = W / 2.0
+    center_n = (W - 1) / 2.0
 
     w_indices = torch.arange(W, dtype=torch.float32, device=device)
-    distance_from_center = (w_indices - center_n) / sigma
-    weight_1d = torch.exp(-(distance_from_center ** 2))
+    distance = w_indices - center_n
+    weight_1d = torch.exp(-(distance ** 2) / (2.0 * sigma ** 2))
 
-    tau = math.exp(-1.0)
+    weight = weight_1d.view(1, 1, 1, 1, W)
+    if len(shape) == 5:
+        return weight.expand(B, C, D, H, W).contiguous()
+    return weight.view(1, 1, W).expand(D, H, W).contiguous()
 
 
 def fm_create_middle_slab_prior_mask(shape: tuple, device: torch.device | None = None, dtype: torch.dtype | None = None) -> torch.Tensor:
@@ -388,8 +377,8 @@ def fm_create_middle_slab_prior_mask(shape: tuple, device: torch.device | None =
     dtype = dtype if dtype is not None else torch.float32
 
     # Define slab in IMAGE space (W axis, same as visualization's "Axial" slice index)
-    # then resample to the requested latent W resolution. This guarantees the latent
-    # prior has the exact same orientation as the image-space map.
+    # then resample to the requested W resolution. This keeps the prior aligned
+    # with the image-space map.
     img_W = int(ROI_SHAPE[2])
     start_img = int(globals().get('MIDDLE_SLAB_IMAGE_SLICE_START', 20))
     end_img = int(globals().get('MIDDLE_SLAB_IMAGE_SLICE_END', 28))
@@ -421,12 +410,12 @@ def fm_create_middle_slab_prior_mask(shape: tuple, device: torch.device | None =
     # Resample image-space 1D prior to target W
     w1d_img_t = w1d_img.view(1, 1, int(img_W)).to(dtype=torch.float32)
     if int(img_W) != int(W):
-        w1d_lat = F.interpolate(w1d_img_t, size=int(W), mode='linear', align_corners=False)
+        w1d_target = F.interpolate(w1d_img_t, size=int(W), mode='linear', align_corners=False)
     else:
-        w1d_lat = w1d_img_t
-    w1d_lat = w1d_lat.view(int(W)).to(dtype=dtype)
+        w1d_target = w1d_img_t
+    w1d_target = w1d_target.view(int(W)).to(dtype=dtype)
 
-    w = w1d_lat.view(1, 1, 1, 1, int(W)).expand(int(B), 1, int(D), int(H), int(W)).contiguous()
+    w = w1d_target.view(1, 1, 1, 1, int(W)).expand(int(B), 1, int(D), int(H), int(W)).contiguous()
     return w
 
 
@@ -503,10 +492,10 @@ class TeacherUNet3D(nn.Module):
     Input: concat(x0, x1) [B, 2*in_channels, D, H, W]
     Output: velocity [B, out_channels, D, H, W]
     """
-    def __init__(self, base_channels=48, latent_channels=4, use_time_emb=True):
+    def __init__(self, base_channels=48, feature_channels=4, use_time_emb=True):
         super().__init__()
         c = base_channels
-        self.latent_channels = latent_channels
+        self.feature_channels = feature_channels
         self.use_time_emb = use_time_emb
 
         # Time embedding
@@ -517,11 +506,11 @@ class TeacherUNet3D(nn.Module):
         else:
             self.emb_channels = None
 
-        # Input: 2 * latent_channels (POD5 + POY1 concatenated)
-        in_ch = 2 * latent_channels
+        # Input: POD5 + POY1 concatenated
+        in_ch = 2 * feature_channels
         self.in_conv = nn.Conv3d(in_ch, c, 3, padding=1)
 
-        # LATENT SPACE: 12³ -> 6³ -> 3³ -> 6³ -> 12³
+        # Feature volume path: 12³ -> 6³ -> 3³ -> 6³ -> 12³
         if use_time_emb:
             self.e1_1 = TeacherResBlock3DWithTimeEmb(c, emb_channels)
             self.e1_2 = TeacherResBlock3DWithTimeEmb(c, emb_channels)
@@ -552,14 +541,14 @@ class TeacherUNet3D(nn.Module):
         self.up1 = nn.ConvTranspose3d(c * 2, c, 3, stride=2, padding=1, output_padding=1)  # 6->12
         self.p1 = nn.Conv3d(c * 2, c, 1)
 
-        # Output: velocity channels (must match latent_channels passed at construction).
-        out_ch = latent_channels
+        # Output: velocity channels.
+        out_ch = feature_channels
         self.out = nn.Sequential(nn.GroupNorm(min(8, c), c), nn.SiLU(), nn.Conv3d(c, out_ch, 3, padding=1))
         nn.init.zeros_(self.out[-1].weight)
         nn.init.zeros_(self.out[-1].bias)
 
     def forward(self, x0, x1, t=None):
-        """Forward pass. x0=POD5 latent, x1=POY1 latent (goal), t=time scalar."""
+        """Forward pass. x0=POD5 features, x1=POY1 features, t=time scalar."""
         x = torch.cat([x0, x1], dim=1)
         h0 = self.in_conv(x)
 
@@ -658,9 +647,9 @@ class SVFTeacherWrapper:
         # Convert from voxel to normalized coords: divide by (size-1)/2 * 2 = size-1
         # Actually for normalized: displacement / ((size-1)/2) but grid is in [-1,1]
         v_norm = torch.zeros_like(v_xyz)
-        v_norm[..., 0] = v_xyz[..., 2] / ((W - 1) / 2)  # x from voxel z
+        v_norm[..., 0] = v_xyz[..., 2] / ((W - 1) / 2)  # x from voxel x
         v_norm[..., 1] = v_xyz[..., 1] / ((H - 1) / 2)  # y from voxel y
-        v_norm[..., 2] = v_xyz[..., 0] / ((D - 1) / 2)  # z from voxel x
+        v_norm[..., 2] = v_xyz[..., 0] / ((D - 1) / 2)  # z from voxel z
         
         # Scaling-and-squaring
         phi = v_norm / (2.0 ** self.ss_squarings)
@@ -746,7 +735,7 @@ class SVFTeacherWrapper:
         if dt_val <= 0.0:
             raise ValueError(f"dt must be > 0 (got {dt_val})")
 
-        scheme = str(globals().get("LYAPUNOV_TEACHER_TANGENT_SCHEME", "forward")).strip().lower()
+        scheme = str(globals().get("LYAPUNOV_TEACHER_TANGENT_SCHEME", "forward2")).strip().lower()
         if scheme not in ("forward", "centered", "forward2"):
             raise ValueError("LYAPUNOV_TEACHER_TANGENT_SCHEME must be 'forward', 'centered', or 'forward2' "
                              f"(got {globals().get('LYAPUNOV_TEACHER_TANGENT_SCHEME')!r})")
@@ -885,7 +874,7 @@ def load_svf_teacher(device: torch.device) -> SVFTeacherWrapper | None:
     except RuntimeError as e:
         raise RuntimeError(
             "SVF Teacher checkpoint does not match the instantiated teacher architecture. "
-            "This usually means you changed the teacher UNet depth/base-channels but are still pointing to an old checkpoint.\n"
+            "This usually means the teacher UNet depth/base-channels do not match the selected checkpoint.\n"
             f"Checkpoint: {ckpt_path}\n"
             f"Detected base_channels={detected_base_ch}, num_downs={detected_num_downs}.\n"
             "Fix: update LYAPUNOV_SVF_TEACHER_CHECKPOINT to the matching .pth or regenerate the teacher.\n"
@@ -1264,25 +1253,24 @@ def rollout_student_to_time_euler(
 
 
 
-def _bone_weight_map(gt_norm_t: torch.Tensor, hu_threshold: float, alpha: float, surface_weight: float) -> torch.Tensor:
-    """Bone-surface weight map for weighted image-space MSE loss."""
+def _gaussian_bone_image_weight(source_norm_t: torch.Tensor, sigma: float, hu_threshold: float) -> torch.Tensor:
+    """W(omega) = Gaussian distance weight times the Day-5 bone mask, in image space."""
     lo, hi = HU_RANGE
-    gt_hu = (gt_norm_t.clamp(-1, 1) + 1.0) * 0.5 * (hi - lo) + lo  # [B,1,D,H,W]
-    bone_mask = (gt_hu > hu_threshold).float()
-    # Surface band: 1-voxel wide using binary erosion
-    bm = bone_mask.squeeze(1).detach().cpu().numpy().astype(np.uint8)  # [B,D,H,W]
-    surface = []
-    from scipy.ndimage import binary_erosion
-    for b in range(bm.shape[0]):
-        er = binary_erosion(bm[b], iterations=1, border_value=0)
-        s = (bm[b] & (~er)).astype(np.float32)
-        surface.append(s)
-    surface = torch.from_numpy(np.stack(surface, axis=0)).to(bone_mask.device).unsqueeze(1)
-    # Base weights: 1 + alpha in bone; add surface bonus
-    w = torch.ones_like(bone_mask)
-    w = w + alpha * bone_mask
-    w = w + surface_weight * surface
-    return w
+    source_hu = (source_norm_t.clamp(-1, 1) + 1.0) * 0.5 * (hi - lo) + lo
+    bone_mask = (source_hu > hu_threshold).to(dtype=source_norm_t.dtype)
+    gaussian_weight = _gaussian_resection_weight(
+        source_norm_t.shape,
+        sigma=sigma,
+        device=source_norm_t.device,
+    ).to(dtype=source_norm_t.dtype)
+    return gaussian_weight * bone_mask
+
+
+def _gaussian_bone_image_loss(pred_norm_t: torch.Tensor, target_norm_t: torch.Tensor, source_norm_t: torch.Tensor, sigma: float, hu_threshold: float) -> torch.Tensor:
+    """Per-sample image-space loss: ||W * (pred - target)||_2^2."""
+    weight = _gaussian_bone_image_weight(source_norm_t, sigma=sigma, hu_threshold=hu_threshold)
+    residual = pred_norm_t - target_norm_t
+    return ((weight * residual) ** 2).flatten(1).mean(dim=1)
 
 def save_orthogonal_png(vol_np, save_path, title):
     """vol_np: [D,H,W] in HU or normalized; just visualize 3 middle slices."""
@@ -1460,7 +1448,7 @@ def _mid_slices_orthogonal(vol_np: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
         cbar.set_label('Weight', rotation=270, labelpad=15, fontsize=9)
         next_row += 1
 
-    # Optional middle-slab prior row (LATENT space, true resolution)
+    # Optional middle-slab prior row at the true feature resolution.
     if slab_prior_np is not None:
         s_np = np.asarray(slab_prior_np, dtype=np.float32)
         s_np = np.clip(s_np, 0.0, 1.0)
@@ -1468,7 +1456,7 @@ def _mid_slices_orthogonal(vol_np: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
         md, mh, mw = D//2, H//2, W//2
         axes[next_row, 0].imshow(s_np[:, mh, :].T, cmap='magma', vmin=0.0, vmax=1.0, origin='lower', interpolation='nearest')
         axes[next_row, 0].set_title('Prior (Sagittal)')
-        axes[next_row, 0].set_ylabel(slab_prior_title or 'Middle-Slab Prior (Latent)', fontsize=11, fontweight='bold')
+        axes[next_row, 0].set_ylabel(slab_prior_title or 'Middle-Slab Prior', fontsize=11, fontweight='bold')
         axes[next_row, 0].set_xticks([]); axes[next_row, 0].set_yticks([])
         axes[next_row, 1].imshow(s_np[md, :, :].T, cmap='magma', vmin=0.0, vmax=1.0, origin='lower', interpolation='nearest')
         axes[next_row, 1].set_title('Prior (Coronal)')
@@ -1912,7 +1900,7 @@ def compute_comprehensive_metrics_middle_slab(pred_hu, target_hu, pred_norm=None
 
     return metrics
 
-def create_metrics_excel_with_footnotes(metrics_list, save_path):
+def create_metrics_excel(metrics_list, save_path):
     """
     Create metrics Excel.
     Columns: epoch, train metrics, test metrics
@@ -1922,7 +1910,7 @@ def create_metrics_excel_with_footnotes(metrics_list, save_path):
     col_order = ['epoch']
     
     # Training/eval losses + diagnostics
-    # Teacher-alignment diagnostics are computed from the SVF teacher trajectory in latent space
+    # Teacher-alignment diagnostics are computed from the SVF teacher trajectory
     # and are comparable across different LOSS_MODE and LYAPUNOV_ALPHA.
     train_cols = [
         'avg_total_loss',
@@ -1979,42 +1967,10 @@ def create_metrics_excel_with_footnotes(metrics_list, save_path):
     num_cols = df.select_dtypes(include=[np.number]).columns
     df[num_cols] = df[num_cols].round(4)
     
-    # Write to Excel with a definitions sheet
+    # Write metrics to Excel.
     with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Epoch Metrics')
-        
-        # Metric definitions (updated)
-        notes = pd.DataFrame({
-            'Metric': [
-                'avg_rmse_v_teacher_tangent',
-                'avg_cos_v_teacher_tangent',
-                'avg_velocity_magnitude_ratio',
-                'avg_endpoint_mae_to_teacher',
-                'MAE_all_HU', 'MAE_bone_HU', 'MS_SSIM', 'MS_SSIM_bone', 'Dice_bone',
-                'MAE_all_HU_mid', 'MAE_bone_HU_mid', 'MS_SSIM_mid', 'MS_SSIM_bone_mid', 'Dice_bone_mid',
-                '⚠️ IMPORTANT', '⚠️ NaN handling'
-            ],
-            'Meaning': [
-                'TeacherTangentRMSE: E_t[ sqrt( mean((v_student(x*(t), t) - dx*(t)/dt)^2) ) ] (lower is better; comparable across LOSS_MODE and LYAPUNOV_ALPHA)',
-                'TangentCosSim: E_t[ cos( v_student(x*(t), t), dx*(t)/dt ) ] on flattened volumes (higher is better; range [-1,1]; comparable across LOSS_MODE)',
-                'VelocityScaleAgreement01: E_t[ min(r,1/r) ], r=mean(|v_student(x*(t),t)|)/mean(|dx*/dt|) in [0,1] (higher is better; comparable across LOSS_MODE)',
-                "EndMAE_toTeacher: mean(|x1_pred - x*(1)|) comparing the student's endpoint x1_pred (computed using USE_DIRECT_ONE_STEP_INFERENCE settings) to teacher endpoint warp x*(1)=Warp(x0,exp(v_svf)) (lower is better; shows if student learns teacher deformation)",
-                'Mean absolute error in HU (all voxels)',
-                'Mean absolute error in HU (bone voxels only, >threshold; NaN if no bone)',
-                'Multi-scale SSIM (similarity, 0-1, higher is better)',
-                'Multi-scale SSIM computed on bone region only (NaN if no bone)',
-                'Dice coefficient for bone segmentation (NaN if both pred/GT have no bone)',
-                'MAE_all_HU computed only on the middle slab W slices',
-                'MAE_bone_HU computed only on the middle slab W slices (NaN if no bone in slab)',
-                'MS_SSIM computed only on the middle slab W slices',
-                'MS_SSIM_bone computed only on the middle slab W slices (NaN if no bone in slab)',
-                'Dice_bone computed only on the middle slab W slices (NaN if both have no bone in slab)',
-                "Metrics use the same endpoint inference mode as USE_DIRECT_ONE_STEP_INFERENCE: if True, ONE-STEP endpoint x1_pred=x0+v(x0,0); if False, multi-step ODE-style integration (Euler/Heun/RK4) with EVAL_INTEGRATION_STEPS and INTEGRATION_METHOD.",
-                'Bone-specific metrics return NaN when undefined (no bone voxels in region). Aggregation uses np.nanmean() to exclude undefined values from averages. This prevents biasing averages toward 0.0 for regions where bone metrics are not applicable.'
-            ]
-        })
-        notes.to_excel(writer, index=False, sheet_name='Metric Definitions')
-        
+
         # Widen columns for readability
         ws = writer.book["Epoch Metrics"]
         for col_cells in ws.columns:
@@ -2023,7 +1979,6 @@ def create_metrics_excel_with_footnotes(metrics_list, save_path):
     
     print(f"Metrics saved to: {save_path}")
     print("   - 'Epoch Metrics' sheet: per-epoch rows + AVERAGE/STD_DEV")
-    print("   - 'Metric Definitions' sheet: metric meanings")
     return
 # ----------------------- Dataset -----------------------------
 class ROI3DDataset(Dataset):
@@ -2031,7 +1986,8 @@ class ROI3DDataset(Dataset):
     Robust pairing with augmented file support:
     - Accepts POD5 like: {case}_POD5_{ROI}[_aug{N}][_RAS].nii.gz
     - Finds POY1 with same pattern
-    - Optionally generates bone masks from POY1 or POD5 using HU threshold
+    - Returns a placeholder bone-mask channel; current training does not use
+      POY1-derived bone-mask conditioning.
     """
     def __init__(self, pod5_dir, poy1_dir, normalize=True, recursive=False):
         self.pod5_dir = Path(pod5_dir)
@@ -2695,10 +2651,10 @@ def LYAPUNOV_velocity_from_valuenet(valuenet: nn.Module, z: torch.Tensor, t: tor
     
     This function handles:
     1. UNetFlowNetwork: outputs velocity directly [B, C, D, H, W]
-    2. UNetFlowNetwork (legacy): outputs scalar V, velocity = -∇V * R_inv
+    2. UNetFlowNetwork scalar-output mode: outputs scalar V, velocity = -∇V * R_inv
     
     Detection: If model output has same shape as input z, it's velocity.
-               If model output is scalar [B], it's value (legacy).
+               If model output is scalar [B], it is a value prediction.
     
     Args:
         valuenet: UNetFlowNetwork or UNetFlowNetwork instance
@@ -2706,7 +2662,7 @@ def LYAPUNOV_velocity_from_valuenet(valuenet: nn.Module, z: torch.Tensor, t: tor
         t: Time [B]
         case_ids: Case IDs for conditioning
         bone_mask: Optional bone mask for conditioning
-        R_inv: Control gain (only used for legacy ValueNet)
+        R_inv: Control gain for scalar-output ValueNet mode
         capture_attn: Whether to capture attention (passed to forward)
     Returns:
         velocity: [B, C, D, H, W] detached velocity field
@@ -2723,7 +2679,7 @@ def LYAPUNOV_velocity_from_valuenet(valuenet: nn.Module, z: torch.Tensor, t: tor
     if output.shape == z.shape:
         return output.detach()
     
-    # Legacy: UNetFlowNetwork outputs scalar V, compute velocity as -∇V * R_inv
+    # Scalar-output mode: compute velocity as -∇V * R_inv.
     if R_inv is None:
         R_inv = float(LYAPUNOV_R_INV)
     
@@ -2918,6 +2874,70 @@ def train_flow_matching(train_dataset, test_dataset):
             )
 
         x_t = x0.clone()
+        dt = 1.0 / float(steps)
+        batch_size = x_t.size(0)
+
+        if method == "rk4":
+            for s in range(steps):
+                t0 = torch.full((batch_size,), s * dt, device=x_t.device)
+                k1 = _vel(x_t, t0)
+                k2 = _vel(x_t + 0.5 * dt * k1, t0 + 0.5 * dt)
+                k3 = _vel(x_t + 0.5 * dt * k2, t0 + 0.5 * dt)
+                k4 = _vel(x_t + dt * k3, t0 + dt)
+                x_t = x_t + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        elif method == "heun":
+            for s in range(steps):
+                t0 = torch.full((batch_size,), s * dt, device=x_t.device)
+                v0 = _vel(x_t, t0)
+                x_euler = x_t + dt * v0
+                t1 = torch.full((batch_size,), (s + 1) * dt, device=x_t.device)
+                v1 = _vel(x_euler, t1)
+                x_t = x_t + 0.5 * dt * (v0 + v1)
+        elif method == "euler":
+            for s in range(steps):
+                t = torch.full((batch_size,), s * dt, device=x_t.device)
+                v = _vel(x_t, t)
+                x_t = x_t + dt * v
+        else:
+            raise ValueError(f"Unknown INTEGRATION_METHOD={method!r} (expected 'euler', 'heun', or 'rk4')")
+
+        return x_t
+
+    def _predict_endpoint_for_loss(
+        train_model: nn.Module,
+        x0: torch.Tensor,
+        case_id_t: torch.Tensor,
+        *,
+        bone_mask_img: torch.Tensor | None,
+        v0_at_t0: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Predict x(1) for differentiable training losses using the configured endpoint mode."""
+        use_direct = bool(globals().get("USE_DIRECT_ONE_STEP_INFERENCE", True))
+        if use_direct:
+            if v0_at_t0 is None:
+                t0 = torch.zeros(x0.size(0), device=x0.device)
+                v0_at_t0 = train_model(
+                    x0,
+                    t0,
+                    case_id_t,
+                    bone_mask=bone_mask_img,
+                )
+            return x0 + v0_at_t0
+
+        steps = int(globals().get("EVAL_INTEGRATION_STEPS", 30))
+        if steps <= 0:
+            raise ValueError(f"EVAL_INTEGRATION_STEPS must be > 0 (got {steps})")
+        method = str(globals().get("INTEGRATION_METHOD", "rk4")).strip().lower()
+
+        def _vel(x_state: torch.Tensor, t_vec: torch.Tensor) -> torch.Tensor:
+            return train_model(
+                x_state,
+                t_vec,
+                case_id_t,
+                bone_mask=bone_mask_img,
+            )
+
+        x_t = x0
         dt = 1.0 / float(steps)
         batch_size = x_t.size(0)
 
@@ -3183,8 +3203,8 @@ def train_flow_matching(train_dataset, test_dataset):
                 global_step = int(ckpt.get('global_step', 0))
                 if prev_epoch >= 1:
                     start_epoch = prev_epoch + 1
-                    print(f"   -> Starting at epoch {start_epoch} (previous avg loss: {ckpt.get('avg_loss', float('nan')):.6f})")
-                # Try loading existing Excel metrics to preserve history (fail-fast on errors)
+                    print(f"   -> Starting at epoch {start_epoch} (checkpoint avg loss: {ckpt.get('avg_loss', float('nan')):.6f})")
+                # Try loading existing Excel metrics to preserve saved rows.
                 train_metrics_excel_path = FM_OUT_DIR / "training_metrics_TRAIN.xlsx"
                 test_metrics_excel_path = FM_OUT_DIR / "training_metrics_TEST.xlsx"
                 if train_metrics_excel_path.exists():
@@ -3261,7 +3281,7 @@ def train_flow_matching(train_dataset, test_dataset):
                 'teacher_tangent_cossim': [],
                 'velocity_magnitude_ratio': [],
                 'endpoint_mae_to_teacher': [],
-                'img': [], 'ssim': [], 'perc': [], 'bone': []
+                'img': [], 'ssim': [], 'perc': []
             }
             test_eval_loader = DataLoader(test_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False, num_workers=EVAL_NUM_WORKERS)
             with torch.no_grad(), autocast(enabled=USE_AMP):
@@ -3305,6 +3325,10 @@ def train_flow_matching(train_dataset, test_dataset):
                     # For comparable diagnostics across modes/epochs, compute velocity at random t
                     t_rand = torch.rand(pod5_t.size(0), device=device)
                     x_t = (1 - t_rand[:, None, None, None, None]) * x0 + t_rand[:, None, None, None, None] * x1_gt
+                    v_t = LYAPUNOV_velocity_from_valuenet(
+                        eval_flow, x_t, t_rand, case_id_t,
+                        bone_mask=bone_mask_img,
+                    )
 
                     # Get plate mask for evaluation (not for zeroing v0, but for loss exclusion)
                     plate_mask_eval = batch.get("plate_mask")
@@ -3317,9 +3341,9 @@ def train_flow_matching(train_dataset, test_dataset):
                     if plate_mask_t is not None:
                         # Completely exclude plate from loss - model doesn't learn anything about plate regions
                         plate_exclusion = (1.0 - plate_mask_t)
-                        fm_loss_val = ((v0 - u_target) ** 2 * plate_exclusion).flatten(1).sum(dim=1) / plate_exclusion.flatten(1).sum(dim=1).clamp_min(1e-6)
+                        fm_loss_val = ((v_t - u_target) ** 2 * plate_exclusion).flatten(1).sum(dim=1) / plate_exclusion.flatten(1).sum(dim=1).clamp_min(1e-6)
                     else:
-                        fm_loss_val = F.mse_loss(v0, u_target, reduction='none').flatten(1).mean(dim=1)
+                        fm_loss_val = F.mse_loss(v_t, u_target, reduction='none').flatten(1).mean(dim=1)
                     test_losses['fm'].extend(fm_loss_val.tolist())
                     
                     # Endpoint loss: only if enabled (with plate exclusion)
@@ -3350,7 +3374,7 @@ def train_flow_matching(train_dataset, test_dataset):
                     vel_mag_ratio_per_sample = velocity_scale_agreement_01(v_star, dx_star_dt)
                     test_losses['velocity_magnitude_ratio'].extend(vel_mag_ratio_per_sample.detach().cpu().tolist())
 
-                    # 3) EndMAE_toTeacher: compare one-step endpoint x1_pred to teacher endpoint x*(1)
+                    # 3) EndMAE_toTeacher: compare predicted endpoint x1_pred to teacher endpoint x*(1)
                     t1 = torch.ones(pod5_t.size(0), device=device)
                     x_star_1 = svf_teacher.get_warped_at_t(pod5_t, poy1_t, t1)
                     end_mae_per_sample = (x1_pred - x_star_1).abs().flatten(1).mean(dim=1)
@@ -3380,17 +3404,14 @@ def train_flow_matching(train_dataset, test_dataset):
                     poy1_pred = x1_pred
 
                     if USE_IMAGE_SPACE_LOSS:
-                        img_loss_val = F.mse_loss(poy1_pred, poy1_t)
-                        img_loss_scalar = img_loss_val.item()
-
-                        test_losses['img'].extend([img_loss_scalar] * batch_size)
-
-                        if USE_IMG_LOSS_BONE_WEIGHTED:
-                            w = _bone_weight_map(poy1_t, hu_threshold=METRICS_BONE_HU_THRESHOLD,
-                                                 alpha=BONE_WEIGHT_ALPHA, surface_weight=BONE_SURFACE_WEIGHT)
-                            bone_mse = ((poy1_pred - poy1_t) ** 2) * w
-                            bone_loss_vals = bone_mse.flatten(1).mean(dim=1)
-                            test_losses['bone'].extend(bone_loss_vals.tolist())
+                        img_loss_vals = _gaussian_bone_image_loss(
+                            poy1_pred,
+                            poy1_t,
+                            pod5_t,
+                            sigma=IMAGE_SPACE_WEIGHT_SIGMA,
+                            hu_threshold=METRICS_BONE_HU_THRESHOLD,
+                        )
+                        test_losses['img'].extend(img_loss_vals.tolist())
 
                     # Metrics
                     pred_norm = poy1_pred.cpu().numpy()
@@ -3418,7 +3439,6 @@ def train_flow_matching(train_dataset, test_dataset):
             avg_end_mae_teacher = float(np.mean(test_losses['endpoint_mae_to_teacher'])) if len(test_losses.get('endpoint_mae_to_teacher', [])) > 0 else float('nan')
 
             avg_img = float(np.mean(test_losses['img'])) if (USE_IMAGE_SPACE_LOSS and len(test_losses['img']) > 0) else float('nan')
-            avg_bone = float(np.mean(test_losses['bone'])) if (USE_IMAGE_SPACE_LOSS and USE_IMG_LOSS_BONE_WEIGHTED and len(test_losses['bone']) > 0) else float('nan')
 
             avg_total = 0.0
             if loss_mode_eval == 'lqr_only':
@@ -3432,8 +3452,6 @@ def train_flow_matching(train_dataset, test_dataset):
             if USE_IMAGE_SPACE_LOSS:
                 if not math.isnan(avg_img):
                     avg_total += IMAGE_SPACE_LOSS_WEIGHT * avg_img
-                if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                    avg_total += BONE_LOSS_LAMBDA * avg_bone
 
             test_epoch0_metrics = {
                 'epoch': 0,
@@ -3452,8 +3470,6 @@ def train_flow_matching(train_dataset, test_dataset):
             if USE_IMAGE_SPACE_LOSS:
                 if not math.isnan(avg_img):
                     test_epoch0_metrics['avg_img_loss'] = avg_img
-                if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                    test_epoch0_metrics['avg_bone_loss'] = avg_bone
 
             if test_metrics_list:
                 for key in test_metrics_list[0].keys():
@@ -3466,7 +3482,7 @@ def train_flow_matching(train_dataset, test_dataset):
 
             # Write Excel row for epoch 0
             test_metrics_excel_path = FM_OUT_DIR / "training_metrics_TEST.xlsx"
-            create_metrics_excel_with_footnotes(all_test_metrics, test_metrics_excel_path)
+            create_metrics_excel(all_test_metrics, test_metrics_excel_path)
             print("  📊 Updated TEST metrics Excel (epoch 0)")
 
             # Print brief summary
@@ -3489,22 +3505,18 @@ def train_flow_matching(train_dataset, test_dataset):
         epoch_fm_loss = 0.0
         epoch_endpoint_loss = 0.0
         epoch_img_loss = 0.0
-        epoch_bone_loss = 0.0
-        epoch_bone_batches = 0
         num_batches = 0
         num_img_loss_batches = 0  # Track how many batches computed image losses
-        
+
         # Track most recent batch losses for logging (persist across batches)
         last_img_loss = None
-        last_bone_loss = None
-        last_bone_loss_weighted = None
         
         for batch_idx, batch in enumerate(train_loader):
             pod5 = batch["pod5"].to(device)  # [B, 1, 48, 48, 48]
             poy1 = batch["poy1"].to(device)
             case_ids = batch["case_id"].to(device)
 
-            # Get bone mask (POY1 bone structure via HU threshold) if enabled
+            # Bone-mask conditioning is disabled here to avoid POY1-derived masks.
             bone_mask = None
             # Get plate mask for loss exclusion if enabled
             plate_mask = None
@@ -3595,8 +3607,8 @@ def train_flow_matching(train_dataset, test_dataset):
                 # Keep a backward-compatible alias for downstream logging/debug.
                 v_pred = v_pred_fm if (v_pred_fm is not None) else v_pred_lyapunov
                 
-                # Note: For STATIC plate behavior, we zero u_target in plate regions (above)
-                # so the model learns to predict zero velocity there. No need to modify v_pred here.
+                # Plate voxels are excluded from the RF loss when a plate mask is available.
+                # No velocity target is imposed in those regions.
                 
                 # Flow matching loss
                 # Skip FM loss computation if in lqr_only mode
@@ -3611,8 +3623,7 @@ def train_flow_matching(train_dataset, test_dataset):
                     else:
                         fm_loss = F.mse_loss(v_pred_fm, u_target)
                 
-                # Endpoint loss: penalize error at t=0
-                # Direct velocity prediction at t=0 in IMAGE SPACE
+                # Endpoint prediction in image space.
                 t0_batch = torch.zeros(pod5.size(0), device=device)
                 v0 = flow(
                     x0,
@@ -3621,19 +3632,24 @@ def train_flow_matching(train_dataset, test_dataset):
                     bone_mask=bone_mask_img,
                 )
                 
-                # Note: v0 is NOT zeroed in plate regions. The model should learn to predict
-                # zero velocity there via the FM loss (where u_target is zeroed in plate regions).
-                # Endpoint loss excludes plate regions via plate_exclusion weighting below.
-                    
-                x0_pushed = x0 + v0  # x0 + v(x0, 0) should equal x1
-                
+                # v0 is not zeroed in plate regions. Endpoint/image losses exclude plate voxels
+                # through plate_exclusion weighting where a plate mask is available.
+
+                x_endpoint = _predict_endpoint_for_loss(
+                    flow,
+                    x0,
+                    case_ids,
+                    bone_mask_img=bone_mask_img,
+                    v0_at_t0=v0,
+                )
+
                 # Simple endpoint loss with optional plate exclusion
-                x_err2 = (x0_pushed - x1) ** 2
+                x_err2 = (x_endpoint - x1) ** 2
                 if plate_mask is not None and EXCLUDE_PLATE_FROM_LOSS:
                     plate_exclusion = 1.0 - plate_mask
                     endpoint_loss = (x_err2 * plate_exclusion).sum() / plate_exclusion.sum().clamp_min(1e-6)
                 else:
-                    endpoint_loss = F.mse_loss(x0_pushed, x1)
+                    endpoint_loss = F.mse_loss(x_endpoint, x1)
                 
                 # ==================== LOSS MODE SELECTION ====================
             # loss_mode already set above to skip FM computation
@@ -3648,66 +3664,31 @@ def train_flow_matching(train_dataset, test_dataset):
             else:  # 'both' (default)
                 loss = fm_w * fm_loss
             
-            # Endpoint loss: independent of LOSS_MODE (added if weight > 0)
-            # Optional image-space losses (MSE/SSIM/Perceptual/Bone)
+            # Endpoint MSE is tracked above for diagnostics. The endpoint training
+            # signal is the bone-focused image-space supervision below.
             img_ramp = 1.0
             img_w = IMAGE_SPACE_LOSS_WEIGHT
-            bone_w = BONE_LOSS_LAMBDA * img_ramp
 
             step_matches_img = ((batch_idx + 1) % IMAGE_SPACE_LOSS_FREQ == 0)
-            want_mse = USE_IMAGE_SPACE_LOSS
-            want_bone = USE_IMAGE_SPACE_LOSS and USE_IMG_LOSS_BONE_WEIGHTED
-            # If ramp is still 0, keep training as pure FM (skip expensive decode)
-            do_img_losses = (img_ramp > 0.0) and step_matches_img and (want_mse or want_bone)
+            do_img_losses = (img_ramp > 0.0) and step_matches_img and USE_IMAGE_SPACE_LOSS
 
-            img_loss = None; bone_loss_term = None
+            img_loss = None
             if do_img_losses:
-                recon_pred = x0_pushed
+                recon_pred = x_endpoint
 
-                # NOTE: We now use proper normalized weighted losses instead of pre-multiplying inputs
-                if FM_RESECTION_PLANE_CONSTRAINT:
-                    plane_mask = fm_create_resection_plane_mask(
-                        recon_pred.shape, sigma=FM_RESECTION_PLANE_SIGMA, device=recon_pred.device
-                    )
-                else:
-                    plane_mask = None
-                
-                use_norm_weight = bool(globals().get('USE_NORMALIZED_WEIGHTED_LOSS', False))
-                
-                # Compute enabled image-space terms with proper weighting
-                if want_mse:
-                    mse_err2 = (recon_pred - poy1) ** 2
-                    # Also add gradient loss component
-                    gx_pred = torch.diff(recon_pred, dim=2); gy_pred = torch.diff(recon_pred, dim=3); gz_pred = torch.diff(recon_pred, dim=4)
-                    gx_tgt = torch.diff(poy1, dim=2); gy_tgt = torch.diff(poy1, dim=3); gz_tgt = torch.diff(poy1, dim=4)
-                    grad_err = (torch.abs(gx_pred - gx_tgt).mean() + torch.abs(gy_pred - gy_tgt).mean() + torch.abs(gz_pred - gz_tgt).mean()) / 3.0
-                    if plane_mask is not None and use_norm_weight:
-                        img_loss = (mse_err2 * plane_mask).sum() / plane_mask.sum().clamp_min(1e-6) + 0.3 * grad_err
-                    elif plane_mask is not None:
-                        img_loss = (mse_err2 * plane_mask).mean() + 0.3 * grad_err
-                    else:
-                        img_loss = mse_err2.mean() + 0.3 * grad_err
-                    last_img_loss = img_loss.item()
-                    
-                # Bone-weighted loss with normalized weighting
-                if want_bone:
-                    w = _bone_weight_map(poy1, hu_threshold=METRICS_BONE_HU_THRESHOLD,
-                                         alpha=BONE_WEIGHT_ALPHA, surface_weight=BONE_SURFACE_WEIGHT)
-                    if plane_mask is not None:
-                        w = w * plane_mask
-                    bone_mse = ((recon_pred - poy1) ** 2) * w
-                    if use_norm_weight:
-                        bone_loss_term = bone_mse.sum() / w.sum().clamp_min(1e-6)
-                    else:
-                        bone_loss_term = bone_mse.mean()
-                    last_bone_loss = bone_loss_term.item()
-                    last_bone_loss_weighted = (BONE_LOSS_LAMBDA * bone_loss_term).item()
+                img_loss_vals = _gaussian_bone_image_loss(
+                    recon_pred,
+                    poy1,
+                    pod5,
+                    sigma=IMAGE_SPACE_WEIGHT_SIGMA,
+                    hu_threshold=METRICS_BONE_HU_THRESHOLD,
+                )
+                img_loss = img_loss_vals.mean()
+                last_img_loss = img_loss.item()
 
                 # Add enabled terms to total loss with their weights
                 if img_loss is not None:
                     loss = loss + img_w * img_loss
-                if bone_loss_term is not None:
-                    loss = loss + (bone_w * bone_loss_term)
             
             # ==================== Analytical Lyapunov/LQR Loss ====================
             # Uses analytical value function V(z,t) = (α/2)||z - z*(t)||²
@@ -3797,10 +3778,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if img_loss is not None:
                     epoch_img_loss += img_loss.item()
                 num_img_loss_batches += 1
-            # Accumulate bone loss independently (only if image-space bone loss was computed)
-            if want_bone and (bone_loss_term is not None):
-                epoch_bone_loss += bone_loss_term.item()
-                epoch_bone_batches += 1
             num_batches += 1
             
             # Step bookkeeping and optional scheduler
@@ -3819,8 +3796,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if 'last_img_loss' in locals() and last_img_loss is not None:
                     log_msg += f" | ImgLoss: {last_img_loss:.6f}"
                     any_img_logged = True
-                if 'last_bone_loss' in locals() and last_bone_loss is not None:
-                    log_msg += f" | BoneLoss: {last_bone_loss:.6f} (×{BONE_LOSS_LAMBDA:.1f}={last_bone_loss_weighted:.6f})"
                 # Log analytical Lyapunov loss
                 if lyapunov_loss_val > 0:
                     raw_lyapunov = float(lyapunov_info.get('raw_lyapunov_loss', lyapunov_info.get('loss_LYAPUNOV_raw', 0.0)))
@@ -3927,14 +3902,11 @@ def train_flow_matching(train_dataset, test_dataset):
         print(f"  Avg Total Loss: {avg_loss:.6f}")
         print(f"  Avg FM Loss: {avg_fm_loss:.6f}")
         print(f"  Avg Endpoint Loss: {avg_endpoint_loss:.6f}")
-        # Print image-space / bone loss averages if computed
+        # Print image-space loss average if computed.
         if num_img_loss_batches > 0:
             if epoch_img_loss > 0:
                 avg_img_loss = epoch_img_loss / num_img_loss_batches
                 print(f"  Avg Img Loss: {avg_img_loss:.6f}")
-        if USE_IMG_LOSS_BONE_WEIGHTED and epoch_bone_batches > 0:
-            avg_bone_loss = epoch_bone_loss / epoch_bone_batches
-            print(f"  Avg Bone Loss: {avg_bone_loss:.6f}")
 
         
         # Decide whether to run full train/test evaluation this epoch
@@ -3958,7 +3930,7 @@ def train_flow_matching(train_dataset, test_dataset):
                     'teacher_tangent_cossim': [],
                     'velocity_magnitude_ratio': [],
                     'endpoint_mae_to_teacher': [],
-                    'img': [], 'ssim': [], 'perc': [], 'bone': []
+                    'img': [], 'ssim': [], 'perc': []
                 }
                 
                 # Batched evaluation over the entire training set
@@ -3981,7 +3953,7 @@ def train_flow_matching(train_dataset, test_dataset):
                         x0 = pod5_t
                         x1_gt = poy1_t
 
-                        # Predict endpoint at t=0 (one-step)
+                        # Predict endpoint using the configured direct or integrated mode.
                         t0 = torch.zeros(pod5_t.size(0), device=device)
                         v0 = LYAPUNOV_velocity_from_valuenet(
                             eval_flow, x0, t0, case_id_t,
@@ -4003,7 +3975,6 @@ def train_flow_matching(train_dataset, test_dataset):
                             plate_mask_t = plate_mask_eval.to(device)
                         
                         u_target = x1_gt - x0  # straight-line target velocity
-                        # IMPORTANT: In earlier versions, fm_loss at t=0 was identical to endpoint_loss.
                         # For meaningful diagnostics, compute FM loss at a random t using x_t.
                         t_rand = torch.rand(pod5_t.size(0), device=device)
                         x_t = (1 - t_rand[:, None, None, None, None]) * x0 + t_rand[:, None, None, None, None] * x1_gt
@@ -4070,23 +4041,19 @@ def train_flow_matching(train_dataset, test_dataset):
                             )
                             LYAPUNOV_scalar = float(lyapunov_loss_batch.item())
                             train_losses['lyapunov'].extend([LYAPUNOV_scalar] * batch_size)
+
+                        poy1_pred = x1_pred
                         
-                            poy1_pred = x1_pred
-                        
-                        # Compute image-space losses if enabled
+                        # Compute Day-5-bone, Gaussian-weighted image-space loss if enabled.
                         if USE_IMAGE_SPACE_LOSS:
-                            img_loss_val = F.mse_loss(poy1_pred, poy1_t)
-                            img_loss_scalar = img_loss_val.item()
-
-                            train_losses['img'].extend([img_loss_scalar] * batch_size)
-
-                            # Bone-weighted loss if enabled
-                            if USE_IMG_LOSS_BONE_WEIGHTED:
-                                w = _bone_weight_map(poy1_t, hu_threshold=METRICS_BONE_HU_THRESHOLD,
-                                                     alpha=BONE_WEIGHT_ALPHA, surface_weight=BONE_SURFACE_WEIGHT)
-                                bone_mse = ((poy1_pred - poy1_t) ** 2) * w
-                                bone_loss_vals = bone_mse.flatten(1).mean(dim=1)
-                                train_losses['bone'].extend(bone_loss_vals.tolist())
+                            img_loss_vals = _gaussian_bone_image_loss(
+                                poy1_pred,
+                                poy1_t,
+                                pod5_t,
+                                sigma=IMAGE_SPACE_WEIGHT_SIGMA,
+                                hu_threshold=METRICS_BONE_HU_THRESHOLD,
+                            )
+                            train_losses['img'].extend(img_loss_vals.tolist())
                         
                         # Convert to numpy and compute metrics per-sample
                         pred_norm = poy1_pred.cpu().numpy()
@@ -4115,7 +4082,6 @@ def train_flow_matching(train_dataset, test_dataset):
 
                 # Optional image-space term means (only when enabled)
                 avg_img = float(np.mean(train_losses['img'])) if (USE_IMAGE_SPACE_LOSS and len(train_losses['img']) > 0) else float('nan')
-                avg_bone = float(np.mean(train_losses['bone'])) if (USE_IMAGE_SPACE_LOSS and USE_IMG_LOSS_BONE_WEIGHTED and len(train_losses['bone']) > 0) else float('nan')
 
                 # Define avg_total_loss to match the selected training objective
                 avg_total = 0.0
@@ -4131,8 +4097,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if USE_IMAGE_SPACE_LOSS:
                     if not math.isnan(avg_img):
                         avg_total += IMAGE_SPACE_LOSS_WEIGHT * avg_img
-                    if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                        avg_total += BONE_LOSS_LAMBDA * avg_bone
 
                 train_epoch_metrics = {
                     'epoch': epoch,
@@ -4152,8 +4116,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if USE_IMAGE_SPACE_LOSS:
                     if not math.isnan(avg_img):
                         train_epoch_metrics['avg_img_loss'] = avg_img
-                    if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                        train_epoch_metrics['avg_bone_loss'] = avg_bone
                 
                 if train_metrics_list:
                     for key in train_metrics_list[0].keys():
@@ -4177,7 +4139,7 @@ def train_flow_matching(train_dataset, test_dataset):
                     'teacher_tangent_cossim': [],
                     'velocity_magnitude_ratio': [],
                     'endpoint_mae_to_teacher': [],
-                    'img': [], 'ssim': [], 'perc': [], 'bone': []
+                    'img': [], 'ssim': [], 'perc': []
                 }
                 
                 # Batched evaluation over the entire test set
@@ -4200,7 +4162,7 @@ def train_flow_matching(train_dataset, test_dataset):
                         x0 = pod5_t
                         x1_gt = poy1_t
                         
-                        # Predict endpoint at t=0 (one-step)
+                        # Predict endpoint using the configured direct or integrated mode.
                         t0 = torch.zeros(pod5_t.size(0), device=device)
                         v0 = LYAPUNOV_velocity_from_valuenet(
                             eval_flow, x0, t0, case_id_t,
@@ -4288,23 +4250,19 @@ def train_flow_matching(train_dataset, test_dataset):
                             )
                             LYAPUNOV_scalar = float(lyapunov_loss_batch.item())
                             test_losses['lyapunov'].extend([LYAPUNOV_scalar] * batch_size)
+
+                        poy1_pred = x1_pred
                         
-                            poy1_pred = x1_pred
-                        
-                        # Compute image-space losses if enabled
+                        # Compute Day-5-bone, Gaussian-weighted image-space loss if enabled.
                         if USE_IMAGE_SPACE_LOSS:
-                            img_loss_val = F.mse_loss(poy1_pred, poy1_t)
-                            img_loss_scalar = img_loss_val.item()
-
-                            test_losses['img'].extend([img_loss_scalar] * batch_size)
-
-                            # Bone-weighted loss if enabled
-                            if USE_IMG_LOSS_BONE_WEIGHTED:
-                                w = _bone_weight_map(poy1_t, hu_threshold=METRICS_BONE_HU_THRESHOLD,
-                                                     alpha=BONE_WEIGHT_ALPHA, surface_weight=BONE_SURFACE_WEIGHT)
-                                bone_mse = ((poy1_pred - poy1_t) ** 2) * w
-                                bone_loss_vals = bone_mse.flatten(1).mean(dim=1)
-                                test_losses['bone'].extend(bone_loss_vals.tolist())
+                            img_loss_vals = _gaussian_bone_image_loss(
+                                poy1_pred,
+                                poy1_t,
+                                pod5_t,
+                                sigma=IMAGE_SPACE_WEIGHT_SIGMA,
+                                hu_threshold=METRICS_BONE_HU_THRESHOLD,
+                            )
+                            test_losses['img'].extend(img_loss_vals.tolist())
                         
                         # Convert to numpy and compute metrics per-sample
                         pred_norm = poy1_pred.cpu().numpy()
@@ -4332,7 +4290,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 avg_end_mae_teacher = float(np.mean(test_losses['endpoint_mae_to_teacher'])) if len(test_losses.get('endpoint_mae_to_teacher', [])) > 0 else float('nan')
 
                 avg_img = float(np.mean(test_losses['img'])) if (USE_IMAGE_SPACE_LOSS and len(test_losses['img']) > 0) else float('nan')
-                avg_bone = float(np.mean(test_losses['bone'])) if (USE_IMAGE_SPACE_LOSS and USE_IMG_LOSS_BONE_WEIGHTED and len(test_losses['bone']) > 0) else float('nan')
 
                 if loss_mode_eval == 'lqr_only':
                     avg_total = avg_lyapunov if not math.isnan(avg_lyapunov) else 0.0
@@ -4345,8 +4302,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if USE_IMAGE_SPACE_LOSS:
                     if not math.isnan(avg_img):
                         avg_total += IMAGE_SPACE_LOSS_WEIGHT * avg_img
-                    if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                        avg_total += BONE_LOSS_LAMBDA * avg_bone
 
                 test_epoch_metrics = {
                     'epoch': epoch,
@@ -4366,8 +4321,6 @@ def train_flow_matching(train_dataset, test_dataset):
                 if USE_IMAGE_SPACE_LOSS:
                     if not math.isnan(avg_img):
                         test_epoch_metrics['avg_img_loss'] = avg_img
-                    if USE_IMG_LOSS_BONE_WEIGHTED and not math.isnan(avg_bone):
-                        test_epoch_metrics['avg_bone_loss'] = avg_bone
                 
                 # Average all metric values across test samples
                 if test_metrics_list:
@@ -4413,12 +4366,12 @@ def train_flow_matching(train_dataset, test_dataset):
             # Update Excel files only for enabled metric computations
             if COMPUTE_TRAIN_METRICS:
                 train_metrics_excel_path = FM_OUT_DIR / "training_metrics_TRAIN.xlsx"
-                create_metrics_excel_with_footnotes(all_train_metrics, train_metrics_excel_path)
+                create_metrics_excel(all_train_metrics, train_metrics_excel_path)
                 print(f"  📊 Updated TRAIN metrics Excel (epoch {epoch})")
             
             if COMPUTE_TEST_METRICS:
                 test_metrics_excel_path = FM_OUT_DIR / "training_metrics_TEST.xlsx"
-                create_metrics_excel_with_footnotes(all_test_metrics, test_metrics_excel_path)
+                create_metrics_excel(all_test_metrics, test_metrics_excel_path)
                 print(f"  📊 Updated TEST metrics Excel (epoch {epoch})")
             
             if not COMPUTE_TRAIN_METRICS and not COMPUTE_TEST_METRICS:
@@ -4471,7 +4424,7 @@ def train_flow_matching(train_dataset, test_dataset):
             }, checkpoint_path)
             print(f"💾 Saved checkpoint: {checkpoint_path}")
         if _should_save_epoch(RECON_SAVE_UNIT, RECON_SAVE_INTERVAL, epoch):
-            # Generate and save reconstructions from latent space
+            # Generate and save reconstructions
             # Use online model for visualizations; EMA can lag heavily early on.
             flow.eval()
             with torch.no_grad(), autocast(enabled=USE_AMP):
@@ -4710,31 +4663,38 @@ def map_and_decode_integrated(
             bone_mask=mask_arg,
         )
     
+    steps = int(steps)
+    if steps <= 0:
+        raise ValueError(f"steps must be > 0 (got {steps})")
+    method = str(globals().get("INTEGRATION_METHOD", "rk4")).strip().lower()
+
     x_t = x.clone()
-    dt = 1.0 / steps
+    dt = 1.0 / float(steps)
     batch_size = x_t.shape[0]
 
-    if INTEGRATION_METHOD == 'rk4':
+    if method == 'rk4':
         for s in range(steps):
-            t0 = torch.full((batch_size,), s * dt, device=device)
+            t0 = torch.full((batch_size,), s * dt, device=x_t.device)
             k1 = _velocity(x_t, t0)
             k2 = _velocity(x_t + 0.5 * dt * k1, t0 + 0.5 * dt)
             k3 = _velocity(x_t + 0.5 * dt * k2, t0 + 0.5 * dt)
             k4 = _velocity(x_t + dt * k3, t0 + dt)
             x_t = x_t + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-    elif INTEGRATION_METHOD == 'heun':
+    elif method == 'heun':
         for s in range(steps):
-            t0 = torch.full((batch_size,), s * dt, device=device)
+            t0 = torch.full((batch_size,), s * dt, device=x_t.device)
             v0 = _velocity(x_t, t0)
             x_euler = x_t + dt * v0
-            t1 = torch.full((batch_size,), (s + 1) * dt, device=device)
+            t1 = torch.full((batch_size,), (s + 1) * dt, device=x_t.device)
             v1 = _velocity(x_euler, t1)
             x_t = x_t + 0.5 * dt * (v0 + v1)
-    else:  # euler
+    elif method == 'euler':
         for s in range(steps):
-            t = torch.full((batch_size,), s * dt, device=device)
+            t = torch.full((batch_size,), s * dt, device=x_t.device)
             v = _velocity(x_t, t)
             x_t = x_t + dt * v
+    else:
+        raise ValueError(f"Unknown INTEGRATION_METHOD={method!r} (expected 'euler', 'heun', or 'rk4')")
     
     return x_t.squeeze().cpu()
 
@@ -4845,9 +4805,11 @@ def integrate_image_space_flow_trajectory(
             t1_vec = torch.full((batch_size,), float(t_next), device=device)
             v1 = _velocity(x_euler, t1_vec)
             x_t = x_t + 0.5 * dt * (v0 + v1)
-        else:  # euler
+        elif method == "euler":
             v = _velocity(x_t, t_vec)
             x_t = x_t + dt * v
+        else:
+            raise ValueError(f"Unknown INTEGRATION_METHOD={method!r} (expected 'euler', 'heun', or 'rk4')")
 
         x_values.append(x_t.squeeze().detach().cpu())
 

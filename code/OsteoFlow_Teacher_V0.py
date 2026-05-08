@@ -77,15 +77,10 @@ CFG_DROPOUT_REPLACE = 'copy_x0'  # What to use when dropping POY1: 'zeros', 'noi
 
 # Loss weighting (bone emphasis)
 BONE_HU_THRESHOLD = 300.0
-METRICS_BONE_HU_THRESHOLD = BONE_HU_THRESHOLD  # FM V18 parity: threshold used for Dice / bone metrics
-MIDDLE_SLAB_IMAGE_SLICE_START = 18  # FM V18 parity: inclusive W-slice start
-MIDDLE_SLAB_IMAGE_SLICE_END = 30    # FM V18 parity: inclusive W-slice end
-# Bone-weighting strength for reconstruction losses.
-# When used (image-space SVF recon), per-voxel weight is:
-#   w = 1 + BONE_WEIGHT_ALPHA * 1[HU_target > BONE_HU_THRESHOLD]
-# so bone voxels get weight (1 + alpha) (e.g., 16x when alpha=15) and non-bone voxels get weight 1.
-# This does NOT affect FM velocity MSE unless you explicitly add a bone-weighted image-space loss.
-BONE_WEIGHT_ALPHA = 10.0
+METRICS_BONE_HU_THRESHOLD = BONE_HU_THRESHOLD  # threshold used for Dice / bone metrics
+MIDDLE_SLAB_IMAGE_SLICE_START = 18  # inclusive W-slice start
+MIDDLE_SLAB_IMAGE_SLICE_END = 30    # inclusive W-slice end
+IMAGE_SPACE_WEIGHT_SIGMA = 30.0
 
 # SVF Diffeomorphic Registration Parameters
 # φ = exp(v_svf) via scaling-and-squaring with SS_SQUARINGS iterations
@@ -93,7 +88,7 @@ SVF_FLOW_CAP_VOX = 7.0   # cap SVF velocity per-voxel per-axis (in voxels)
 SS_SQUARINGS = 7         # scaling-and-squaring exponent (2^7 = 128 compositions)
 
 # Resection plane constraint: smooth exponential weighting on deformation
-# ONLY applies in IMAGE SPACE + SVF MODE (disabled for latent space or FM mode)
+# ONLY applies in IMAGE SPACE + SVF MODE (disabled outside SVF image-space mode)
 # At center (resection plane): weight = 0 (no deformation)
 # Away from center: weight -> 1 exponentially (full deformation)
 RESECTION_PLANE_CONSTRAINT = False   # If True, apply smooth exponential weighting to velocity (IMAGE + SVF only!)
@@ -104,12 +99,6 @@ RESECTION_PLANE_PROFILE = 'gaussian'  # 'gaussian' (default), 'sigmoid', 'cosine
 # This often removes the visible "seam/jump" while still strongly discouraging motion.
 # 0.0 keeps the original behavior (exactly zero at the center).
 RESECTION_PLANE_MIN_WEIGHT = 0.0001
-
-# Resection plane constraint for intensity residual (separate from deformation)
-# ONLY applies in IMAGE SPACE + SVF MODE (FM mode has no intensity residual)
-# Same smooth exponential weighting applied to additive intensity channel
-INTENSITY_PLANE_CONSTRAINT = False   # If True, apply smooth exponential weighting to intensity residual (IMAGE + SVF only!)
-INTENSITY_PLANE_SIGMA = 77.0         # Controls falloff rate for intensity (can differ from deformation sigma)
 
 # Print configuration summary
 print(f"\n🎯 OsteoFlow_Teacher Configuration:")
@@ -138,7 +127,7 @@ def denorm_to_hu(v_np: np.ndarray, hu_range=HU_RANGE):
 
 
 def create_resection_plane_mask(shape: tuple, sigma: float = None, device: torch.device = None, profile: str = None) -> torch.Tensor:
-    """Create the resection-plane weight mask (matches One_Shot_Regis.create_resection_plane_mask)."""
+    """Create the resection-plane weight mask."""
     if sigma is None:
         sigma = globals().get('RESECTION_PLANE_SIGMA', 3.0)
 
@@ -234,23 +223,13 @@ def get_resection_plane_weight_info(n_size: int, sigma: float = None, profile: s
     }
 
 def apply_resection_plane_mask(v_vox: torch.Tensor, sigma: float = None) -> torch.Tensor:
-    """Apply smooth exponential resection-plane weighting (matches One_Shot_Regis.apply_resection_plane_mask)."""
+    """Apply smooth exponential resection-plane weighting."""
     if sigma is None:
         sigma = globals().get('RESECTION_PLANE_SIGMA', 3.0)
     B, C, D, H, W = v_vox.shape
     mask = create_resection_plane_mask((B, C, D, H, W), sigma=sigma, device=v_vox.device)
     return v_vox * mask.detach()
 
-
-def apply_resection_constraint_to_intensity(a_raw: torch.Tensor, sigma: float = None) -> torch.Tensor:
-    """Apply the same plane weighting to intensity residual (matches One_Shot_Regis.apply_resection_constraint_to_intensity)."""
-    if not globals().get('INTENSITY_PLANE_CONSTRAINT', False):
-        return a_raw
-    if sigma is None:
-        sigma = globals().get('INTENSITY_PLANE_SIGMA', 15.0)
-    B, C, D, H, W = a_raw.shape
-    mask = create_resection_plane_mask((B, C, D, H, W), sigma=sigma, device=a_raw.device)
-    return a_raw * mask.detach()
 
 def _maybe_resample_to_roi(v_np, roi_shape=ROI_SHAPE):
     if tuple(v_np.shape) != tuple(roi_shape):
@@ -576,12 +555,11 @@ def jacobian_determinant(phi_norm: torch.Tensor) -> torch.Tensor:
     )
     return detJ
 
-# NOTE: integrate_rectified_flow function removed - this module now uses SVF-only mode
-# For diffeomorphic integration, use expv_scaling_squaring() instead
+# Diffeomorphic endpoint integration uses expv_scaling_squaring().
 
-# ----------------------- Time Embedding (FM V10 Style) -----------------------
+# ----------------------- Time Embedding -----------------------
 class TimeEmbedding(nn.Module):
-    """Sinusoidal time embedding with learned projection (FM V10 style)."""
+    """Sinusoidal time embedding with learned projection."""
     def __init__(self, d_t=64, M=1000, out_channels=128):
         super().__init__()
         self.d_t = d_t
@@ -697,7 +675,7 @@ class ResBlock3DPlain(nn.Module):
         return x + h
 
 class ResBlock3DWithTimeEmb(nn.Module):
-    """Residual block with time embedding modulation (FM V10 style)."""
+    """Residual block with time embedding modulation."""
     def __init__(self, channels, emb_channels, dropout=0.1):
         super().__init__()
         self.norm1 = nn.GroupNorm(min(8, channels), channels)
@@ -745,7 +723,7 @@ class UNet3D(nn.Module):
     
     IMAGE SPACE mode:
         Input: concat(x0, x1) [B, 2, 48, 48, 48] -> outputs [B, 3, 48, 48, 48]
-        Spatial: 48 -> 24 -> 12 -> 24 -> 48 (2 levels, matching FM_V26)
+        Spatial: 48 -> 24 -> 12 -> 24 -> 48 (2 levels)
     
     Output:
         - (vz, vy, vx) = SVF in voxel units, capped by SVF_FLOW_CAP_VOX
@@ -759,7 +737,7 @@ class UNet3D(nn.Module):
         
         self.use_time_emb = use_time_emb
         
-        # Time embedding for FM mode (FM V10 style)
+        # Time embedding for flow-matching mode
         if use_time_emb:
             emb_channels = 256
             self.time_emb = TimeEmbedding(d_t=64, M=1000, out_channels=emb_channels)
@@ -774,7 +752,7 @@ class UNet3D(nn.Module):
         self._expect_cond_flag = (in_ch == 2 * img_ch + 1)
         self.in_conv = nn.Conv3d(in_ch, c, 3, padding=1)
         
-        # IMAGE SPACE: 48³ input -> 2 downsampling levels (48->24->12) [FM_V26 architecture]
+        # IMAGE SPACE: 48³ input -> 2 downsampling levels (48->24->12)
         # enc - use time-aware blocks if time embedding enabled
         if use_time_emb:
             self.e1_1 = ResBlock3DWithTimeEmb(c, emb_channels);   self.e1_2 = ResBlock3DWithTimeEmb(c, emb_channels)
@@ -828,9 +806,9 @@ class UNet3D(nn.Module):
         if self.use_time_emb and t is not None:
             t_emb = self.time_emb(t)  # [B, emb_channels]
         
-        # IMAGE SPACE: 48³ -> 24³ -> 12³ -> 24³ -> 48³ (2 levels, FM_V26 architecture)
+        # IMAGE SPACE: 48³ -> 24³ -> 12³ -> 24³ -> 48³ (2 levels)
         if self.use_time_emb and t_emb is not None:
-            # Time-modulated blocks (FM V10 style)
+            # Time-modulated blocks
             h1 = self.e1_1(h0, t_emb); h1 = self.e1_2(h1, t_emb); s1 = h1
             h2 = self.down1(h1)
             h2 = self.e2_1(h2, t_emb); h2 = self.e2_2(h2, t_emb); s2 = h2
@@ -869,7 +847,7 @@ class UNet3D(nn.Module):
             x = torch.cat([x0, x1], dim=1)
         h0 = self.in_conv(x)
         
-        # IMAGE SPACE: 48³ -> 24³ -> 12³ -> 24³ -> 48³ (2 levels, FM_V26 architecture)
+        # IMAGE SPACE: 48³ -> 24³ -> 12³ -> 24³ -> 48³ (2 levels)
         h1 = self.e1_1(h0); h1 = self.e1_2(h1); s1 = h1
         h2 = self.down1(h1)
         h2 = self.e2_1(h2); h2 = self.e2_2(h2); s2 = h2
@@ -1084,20 +1062,44 @@ class SVFDiffeomorphicTeacher(nn.Module):
 
 
 # ----------------------- Losses & Metrics -------------------------------
-def bone_weight_map_from_poy1_hu(poy1_hu_t: torch.Tensor, threshold=BONE_HU_THRESHOLD, alpha=BONE_WEIGHT_ALPHA):
-    """Build voxel weights from the target (POY1) HU.
+def gaussian_resection_weight(shape: tuple, sigma: float, device: torch.device | None = None) -> torch.Tensor:
+    """Smooth Gaussian weight along the image W axis."""
+    if len(shape) == 5:
+        B, C, D, H, W = shape
+    elif len(shape) == 3:
+        D, H, W = shape
+        B, C = 1, 1
+    else:
+        raise ValueError(f"Unexpected shape for Gaussian resection weight: {shape}")
 
-    Used to emphasize bone regions in reconstruction losses:
-      bone voxels (HU > threshold) -> weight = 1 + alpha
-      other voxels                -> weight = 1
-    """
-    with torch.no_grad():
-        bone = (poy1_hu_t > threshold).float()
-        w = 1.0 + alpha * bone
-    return w
+    sigma = max(float(sigma), 0.1)
+    center_n = (W - 1) / 2.0
+    w_indices = torch.arange(W, dtype=torch.float32, device=device)
+    distance = w_indices - center_n
+    weight_1d = torch.exp(-(distance ** 2) / (2.0 * sigma ** 2))
 
-def weighted_l1_norm(pred, target, weight):
-    return (weight * torch.abs(pred - target)).sum() / (weight.sum() + 1e-8)
+    weight = weight_1d.view(1, 1, 1, 1, W)
+    if len(shape) == 5:
+        return weight.expand(B, C, D, H, W).contiguous()
+    return weight.view(1, 1, W).expand(D, H, W).contiguous()
+
+
+def gaussian_bone_image_weight_from_day5(source_hu_t: torch.Tensor, sigma: float, threshold: float = BONE_HU_THRESHOLD) -> torch.Tensor:
+    """W(omega) = Gaussian distance weight times the Day-5 bone mask."""
+    bone_mask = (source_hu_t > threshold).to(dtype=source_hu_t.dtype)
+    spatial_weight = gaussian_resection_weight(
+        source_hu_t.shape,
+        sigma=sigma,
+        device=source_hu_t.device,
+    ).to(dtype=source_hu_t.dtype)
+    return spatial_weight * bone_mask
+
+
+def gaussian_bone_image_loss(pred, target, source_hu_t, sigma: float) -> torch.Tensor:
+    """Image-space loss: ||W * (pred - target)||_2^2."""
+    weight = gaussian_bone_image_weight_from_day5(source_hu_t, sigma=sigma)
+    residual = pred - target
+    return ((weight * residual) ** 2).flatten(1).mean(dim=1).mean()
 
 def tv_l2_3d(v: torch.Tensor) -> torch.Tensor:
     """ L2 TV on a vector field v [B,3,D,H,W]. """
@@ -1123,7 +1125,7 @@ def ssim3d(x: torch.Tensor, y: torch.Tensor, C1=0.01**2, C2=0.03**2, win: int = 
     return ssim_val.mean()
 
 def ssim3d_map(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0, win: int = 3) -> torch.Tensor:
-    """Return per-voxel SSIM map (same spatial shape as x/y) (FM V18 parity)."""
+    """Return per-voxel SSIM map with the same spatial shape as x/y."""
     C1 = (0.01 * float(data_range)) ** 2
     C2 = (0.03 * float(data_range)) ** 2
     pad = win // 2
@@ -1140,7 +1142,7 @@ def ssim3d_map(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0, win: i
     return ssim_val
 
 def ms_ssim3d_simple(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) -> torch.Tensor:
-    """Simple MS-SSIM matching FM V18 exactly (expects normalized volumes, default data_range=2.0)."""
+    """Simple MS-SSIM for normalized volumes."""
     C1 = (0.01 * float(data_range)) ** 2
     C2 = (0.03 * float(data_range)) ** 2
 
@@ -1162,7 +1164,7 @@ def ms_ssim3d_simple(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) 
     return 0.5 * (s1 + s2)
 
 def ms_ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Masked MS-SSIM: weight SSIM maps by a soft mask (e.g., bone voxels) across scales (FM V18 parity)."""
+    """Masked MS-SSIM: weight SSIM maps by a soft mask across scales."""
     if mask.dim() == 4:
         mask = mask.unsqueeze(1)
     mask = mask.to(dtype=x.dtype, device=x.device)
@@ -1178,7 +1180,7 @@ def ms_ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, eps: 
     return 0.5 * (s1 + s2)
 
 def compute_dice_score(pred_hu, target_hu, threshold=METRICS_BONE_HU_THRESHOLD) -> float:
-    """FM V18 parity: Dice on HU-thresholded bone mask."""
+    """Dice on HU-thresholded bone mask."""
     pred_bone = (pred_hu > threshold).astype(np.float32)
     target_bone = (target_hu > threshold).astype(np.float32)
     intersection = float(np.sum(pred_bone * target_bone))
@@ -1188,7 +1190,7 @@ def compute_dice_score(pred_hu, target_hu, threshold=METRICS_BONE_HU_THRESHOLD) 
     return float((2.0 * intersection) / union_size)
 
 def compute_comprehensive_metrics(pred_hu, target_hu, pred_norm=None, target_norm=None):
-    """FM V18 parity metric set (5 metrics): MAE_all_HU, MAE_bone_HU, MS_SSIM, MS_SSIM_bone, Dice_bone."""
+    """Compute MAE, MS-SSIM, and Dice metrics."""
     metrics = {}
     metrics['MAE_all_HU'] = float(np.mean(np.abs(pred_hu - target_hu)))
 
@@ -1221,7 +1223,7 @@ def compute_comprehensive_metrics(pred_hu, target_hu, pred_norm=None, target_nor
     return metrics
 
 def _make_w_slab_mask_np(shape: tuple[int, int, int], w_start: int, w_end: int) -> np.ndarray:
-    """FM V18 parity: hard slab mask selecting W slices in [w_start, w_end] inclusive."""
+    """Create a hard slab mask selecting W slices in [w_start, w_end] inclusive."""
     if len(shape) != 3:
         raise ValueError(f"Expected 3D shape (D,H,W), got: {shape}")
     D, H, W = shape
@@ -1238,7 +1240,7 @@ def _make_w_slab_mask_np(shape: tuple[int, int, int], w_start: int, w_end: int) 
     return mask
 
 def compute_comprehensive_metrics_middle_slab(pred_hu, target_hu, pred_norm=None, target_norm=None):
-    """FM V18 parity: same 5 metrics but restricted to middle-slab W slices."""
+    """Compute the same metric set restricted to middle-slab W slices."""
     w_start = int(globals().get('MIDDLE_SLAB_IMAGE_SLICE_START', 20))
     w_end = int(globals().get('MIDDLE_SLAB_IMAGE_SLICE_END', 28))
     slab_mask = _make_w_slab_mask_np(target_hu.shape, w_start, w_end)
@@ -1343,8 +1345,8 @@ def write_metrics_excel(df: pd.DataFrame, path: Path):
         pass
     df.to_excel(excel_path, index=False)
 
-def create_metrics_excel_with_footnotes(metrics_list, save_path):
-    """FM V18 parity: write Epoch Metrics + Metric Definitions, with fixed column order."""
+def create_metrics_excel(metrics_list, save_path):
+    """Write epoch metrics with fixed column order."""
     df = pd.DataFrame(metrics_list)
 
     col_order = ['epoch']
@@ -1384,43 +1386,19 @@ def create_metrics_excel_with_footnotes(metrics_list, save_path):
     try:
         with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Epoch Metrics')
-            notes = pd.DataFrame({
-                'Metric': [
-                    'MAE_all_HU', 'MAE_bone_HU', 'MS_SSIM', 'MS_SSIM_bone', 'Dice_bone',
-                    'MAE_all_HU_mid', 'MAE_bone_HU_mid', 'MS_SSIM_mid', 'MS_SSIM_bone_mid', 'Dice_bone_mid',
-                    'Jacobian_min', 'Jacobian_mean', 'Jacobian_nonpos_frac', 'Diffeomorphic'
-                ],
-                'Meaning': [
-                    'Mean absolute error in HU (all voxels)',
-                    'Mean absolute error in HU (bone voxels only, >threshold)',
-                    'Multi-scale SSIM (similarity, 0-1, higher is better)',
-                    'Multi-scale SSIM computed on bone region only',
-                    'Dice coefficient for bone segmentation',
-                    'MAE_all_HU computed only on the middle slab W slices',
-                    'MAE_bone_HU computed only on the middle slab W slices',
-                    'MS_SSIM computed only on the middle slab W slices',
-                    'MS_SSIM_bone computed only on the middle slab W slices',
-                    'Dice_bone computed only on the middle slab W slices',
-                    'Minimum Jacobian determinant (should be >0 for diffeomorphic warp)',
-                    'Mean Jacobian determinant (≈1.0 for volume-preserving transform)',
-                    'Fraction of voxels with non-positive Jacobian (should be 0 for diffeomorphic)',
-                    'True if all Jacobian determinants are positive (fully diffeomorphic)'
-                ]
-            })
-            notes.to_excel(writer, index=False, sheet_name='Metric Definitions')
 
             ws = writer.book["Epoch Metrics"]
             for col_cells in ws.columns:
                 max_len = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col_cells)
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max(10, max_len + 2), 35)
     except Exception as e:
-        print(f"⚠️ Failed to write FM V18-style Excel (openpyxl). Falling back to basic Excel: {e}")
+        print(f"⚠️ Failed to write metrics Excel (openpyxl). Falling back to basic Excel: {e}")
         df.to_excel(str(save_path), index=False)
 
     print(f"📊 Metrics saved to: {save_path}")
 
 def dice_coefficient(m1: torch.Tensor, m2: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """DICE coefficient matching FM V10: 2*|A∩B| / (|A| + |B|)."""
+    """DICE coefficient: 2*|A∩B| / (|A| + |B|)."""
     inter = (m1 * m2).sum()
     union_size = m1.sum() + m2.sum()
     if union_size == 0:
@@ -1550,7 +1528,7 @@ def split_dataset(full_dataset, train_split=TRAIN_SPLIT, seed=RANDOM_SEED, split
     
     n_keys = len(unique_keys)
     
-    # Use RandomState.shuffle() to match FM V10/V15 and VAE V10 split logic exactly
+    # Use deterministic RandomState shuffling for reproducible train/test splits.
     rng = np.random.RandomState(seed)
     key_indices = np.arange(n_keys)
     rng.shuffle(key_indices)
@@ -1681,7 +1659,7 @@ def evaluate_model(model, data_loader):
             all_det_mean.append(det_mean)
             all_det_nonpos_frac.append(nonpos_frac)
 
-        # FM V18 parity: compute metrics per-sample (includes middle-slab variants)
+        # Compute metrics per sample, including middle-slab variants.
         pred_hu_b = denorm_to_hu(x_hat1.squeeze(1).detach().cpu().numpy(), HU_RANGE)
         gt_src = x1
         gt_hu_b = denorm_to_hu(gt_src.squeeze(1).detach().cpu().numpy(), HU_RANGE)
@@ -1724,7 +1702,7 @@ def evaluate_model(model, data_loader):
             'Diffeomorphic': None,
         }
     
-    # Aggregate metrics (FM V18-style keys)
+    # Aggregate metrics.
     if per_sample_metrics:
         dfm = pd.DataFrame(per_sample_metrics)
         agg = dfm.mean(numeric_only=True).to_dict()
@@ -1779,7 +1757,7 @@ def train():
     print(f"   Input: [B, 2, 48, 48, 48] (POD5 + POY1 concatenated)")
     print(f"   Output: [B, 3, 48, 48, 48] (VELOCITY ONLY: vz, vy, vx)")
     print(f"   Mathematical model: φ = exp(v_svf) via scaling-and-squaring (7 iterations)")
-    print(f"   Loss: L1 + MS-SSIM + TV(v_vox) [NO intensity penalty]")
+    print(f"   Loss: Gaussian bone image-space MSE + TV(v_vox)")
     print(f"   Base channels: {base_ch}")
     print()
     
@@ -1791,14 +1769,7 @@ def train():
         print(f"   profile={info['profile']}, σ={info['sigma']:.1f}, center W={info['center']:.1f}, min_w={info['min_weight']}")
         print(f"   w@d=0.5: {info['w_d0p5_left']:.6f} (both middle slices), w@d=1.5: {info['w_d1p5']:.6f}, w@d=2.5: {info['w_d2p5']:.6f}")
         print(f"   w_edge={info['w_edge']:.6f}, max_w_in_ROI={info['w_max']:.6f}")
-    if INTENSITY_PLANE_CONSTRAINT:
-        spatial_size = ROI_SHAPE[2]
-        info_int = get_resection_plane_weight_info(spatial_size, INTENSITY_PLANE_SIGMA, profile=RESECTION_PLANE_PROFILE)
-        print(f"🔒 Intensity constraint: ENABLED (masking intensity residual)")
-        print(f"   profile={info_int['profile']}, σ={info_int['sigma']:.1f}, center W={info_int['center']:.1f}")
-        print(f"   w@d=0.5: {info_int['w_d0p5_left']:.6f}, w@d=1.5: {info_int['w_d1p5']:.6f}, w@d=2.5: {info_int['w_d2p5']:.6f}")
-        print(f"   w_edge={info_int['w_edge']:.6f}, max_w_in_ROI={info_int['w_max']:.6f}")
-    if RESECTION_PLANE_CONSTRAINT or INTENSITY_PLANE_CONSTRAINT:
+    if RESECTION_PLANE_CONSTRAINT:
         print(f"   ROI axes: D=U, H=V, W=N (normal to plane)")
 
     metrics_rows = []
@@ -1814,6 +1785,7 @@ def train():
         for batch in train_loader:
             x0_img = batch["x0"].to(device)
             x1_img = batch["x1"].to(device)
+            x0_hu = batch["x0_hu"].to(device)
             x1_hu = batch["x1_hu"].to(device)
             x0 = x0_img
             x1 = x1_img
@@ -1850,7 +1822,7 @@ def train():
             # Mathematical Foundation:
             #   v_svf(ξ): stationary velocity field over spatial coordinates ξ∈Ω
             #   φ = exp(v_svf): diffeomorphic warp via scaling-and-squaring (7 iterations)
-            #   x̂_1 = warp(x0, φ) + a: warp moving image and add intensity residual
+            #   x_hat_1 = warp(x0, phi): pure diffeomorphic warping
             #
             # This produces biologically-plausible diffeomorphic deformations that
             # respect smooth, topology-preserving transformations.
@@ -1873,12 +1845,14 @@ def train():
             x_warp = warp_image_with_phi_norm(x0, phi_norm)
             x_hat1 = x_warp  # No intensity residual added
             
-            # IMAGE SPACE LOSS: bone-weighted reconstruction
+            # Bone-focused image-space supervision.
             x_hat1 = x_hat1.clamp(-1, 1)
-            w_bone = bone_weight_map_from_poy1_hu(x1_hu)
-            l1_loss = weighted_l1_norm(x_hat1, x1, w_bone)
-            ms_ssim = ms_ssim3d_simple(x_hat1, x1)
-            recon_loss = 0.1 * (1.0 - ms_ssim) + 0.05 * l1_loss
+            recon_loss = gaussian_bone_image_loss(
+                x_hat1,
+                x1,
+                x0_hu,
+                sigma=IMAGE_SPACE_WEIGHT_SIGMA,
+            )
             tv_loss = tv_l2_3d(v_vox)
             tv_w = 2e-2
             loss = recon_loss + tv_w * tv_loss
@@ -1941,7 +1915,7 @@ def train():
             })
             epoch_pbar.update(1)
 
-        # Save checkpoint (matching FM V15 format)
+        # Save checkpoint.
         ckpt_path = CKPT_DIR / f"teacher_epoch_{epoch:04d}.pth"
         torch.save({
             'epoch': epoch,
@@ -2054,15 +2028,15 @@ def train():
 
         # Write metrics Excel each epoch
         try:
-            create_metrics_excel_with_footnotes(metrics_rows, METRICS_DIR / "training_metrics.xlsx")
+            create_metrics_excel(metrics_rows, METRICS_DIR / "training_metrics.xlsx")
         except Exception as e:
             print(f"⚠️ Failed to write metrics Excel: {e}")
 
     if HAS_TQDM: epoch_pbar.close()
 
-    # Final metrics Excel (FM V18-style writer already adds AVERAGE/STD_DEV rows)
+    # Final metrics Excel.
     try:
-        create_metrics_excel_with_footnotes(metrics_rows, METRICS_DIR / "training_metrics.xlsx")
+        create_metrics_excel(metrics_rows, METRICS_DIR / "training_metrics.xlsx")
         print(f"📊 Metrics saved to {METRICS_DIR / 'training_metrics.xlsx'}")
     except Exception as e:
         print(f"⚠️ Failed to finalize metrics Excel: {e}")
