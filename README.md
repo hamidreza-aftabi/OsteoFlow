@@ -3,7 +3,6 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2603.22421-b31b1b.svg)](https://arxiv.org/abs/2603.22421)
 [![arXiv version](https://img.shields.io/badge/arXiv%20version-v1-b31b1b.svg)](https://arxiv.org/abs/2603.22421v1)
 [![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.x-3776AB.svg)](requirements.txt)
 [![PyTorch](https://img.shields.io/badge/PyTorch-required-EE4C2C.svg)](requirements.txt)
 
 OsteoFlow is a teacher-student framework for predicting Year-1 post-operative
