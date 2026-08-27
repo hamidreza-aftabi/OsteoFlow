@@ -14,6 +14,11 @@ with Lyapunov regularization. At inference time, only the student model is used.
 
 Publication: [OsteoFlow on ResearchGate](https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction).
 
+## Updates
+
+- **August 17, 2026** - OsteoFlow was invited for a spotlight presentation.
+- **May 7, 2026** - Early accepted (top 9% of approximately 4,600 submissions).
+
 ## Repository Layout
 
 - `code/` - teacher and student OsteoFlow training scripts.
