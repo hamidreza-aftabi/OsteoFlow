@@ -16,7 +16,7 @@ Publication: [OsteoFlow on ResearchGate](https://www.researchgate.net/publicatio
 
 ## News and Highlights 🎉
 
-- **August 17, 2026** - OsteoFlow was selected for an invited Spotlight presentation.
+- **August 17, 2026** - OsteoFlow was selected for a Spotlight presentation.
 - **May 7, 2026** - OsteoFlow received early acceptance, placing it among the top 9% of approximately 4,600 submissions.
 
 ## Repository Layout
