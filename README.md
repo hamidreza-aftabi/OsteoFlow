@@ -16,9 +16,8 @@ Publication: [OsteoFlow on ResearchGate](https://www.researchgate.net/publicatio
 
 ## News and Highlights 🎉
 
-- **August 17, 2026** - OsteoFlow was selected for a Spotlight presentation.
-- **May 7, 2026** - OsteoFlow received early acceptance, placing it among the top 9% of approximately 4,600 submissions.
-
+- **August 17, 2026** - OsteoFlow was selected for a Spotlight presentation at MICCAI 2026.
+- **May 7, 2026** - OsteoFlow received early acceptance to MICCAI 2026, placing it among the top 9% of approximately 4,600 submissions.
 ## Repository Layout
 
 - `code/` - teacher and student OsteoFlow training scripts.
