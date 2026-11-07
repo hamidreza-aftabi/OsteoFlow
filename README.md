@@ -1,8 +1,7 @@
 # OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction
 
 [![MICCAI 2026](https://img.shields.io/badge/MICCAI-2026-blue.svg)](https://doi.org/10.1007/978-3-032-38186-6_58)
-[![arXiv](https://img.shields.io/badge/arXiv-2603.22421-b31b1b.svg)](https://arxiv.org/abs/2603.22421)
-[![arXiv version](https://img.shields.io/badge/arXiv%20version-v3-b31b1b.svg)](https://arxiv.org/abs/2603.22421v3)
+[![arXiv v3](https://img.shields.io/badge/arXiv-2603.22421v3-b31b1b.svg)](https://arxiv.org/abs/2603.22421v3)
 [![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-required-EE4C2C.svg)](requirements.txt)
 
