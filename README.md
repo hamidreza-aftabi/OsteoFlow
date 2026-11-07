@@ -1,7 +1,8 @@
 # OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction
 
+[![MICCAI 2026](https://img.shields.io/badge/MICCAI-2026-blue.svg)](https://doi.org/10.1007/978-3-032-38186-6_58)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.22421-b31b1b.svg)](https://arxiv.org/abs/2603.22421)
-[![arXiv version](https://img.shields.io/badge/arXiv%20version-v1-b31b1b.svg)](https://arxiv.org/abs/2603.22421v1)
+[![arXiv version](https://img.shields.io/badge/arXiv%20version-v3-b31b1b.svg)](https://arxiv.org/abs/2603.22421v3)
 [![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-required-EE4C2C.svg)](requirements.txt)
 
@@ -12,7 +13,7 @@ graft-host interface. During training, a registration-based teacher provides
 trajectory supervision, while the student learns an image-space transport field
 with Lyapunov regularization. At inference time, only the student model is used.
 
-Publication: [OsteoFlow on ResearchGate](https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction).
+Published paper: [MICCAI 2026 / Springer](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
 
 ## News and Highlights 🎉
 
@@ -57,13 +58,13 @@ pip install -r requirements.txt
 Run the teacher model:
 
 ```bash
-python code/OsteoFlow_Teacher_V0.py
+python code/OsteoFlow_Teacher_V1.py
 ```
 
 Run the student model:
 
 ```bash
-python code/OsteoFlow_Student_V0.py
+python code/OsteoFlow_Student_V1.py
 ```
 
 ## Model Input and Resolution
@@ -125,7 +126,30 @@ Access requests may be directed to the corresponding author.
 
 ## Citation
 
-If you use OsteoFlow, please cite:
+If you use OsteoFlow, please cite the published MICCAI paper and the arXiv preprint:
+
+### Published MICCAI paper
+
+The publisher's official citation uses 2027 for the MICCAI 2026 proceedings.
+The paper was first published online on September 25, 2026.
+
+```bibtex
+@inproceedings{aftabi2027osteoflow,
+  title = {OsteoFlow: Lyapunov-Guided Flow Distillation for Predicting Bone Remodeling after Mandibular Reconstruction},
+  author = {Aftabi, Hamidreza and Yu, Faye and Switzer, Brooke and Fishman, Zachary and Prisman, Eitan and Hodgson, Antony and Whyne, Cari and Fels, Sidney and Hardisty, Michael},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention -- MICCAI 2026},
+  series = {Lecture Notes in Computer Science},
+  volume = {16889},
+  pages = {616--626},
+  year = {2027},
+  publisher = {Springer Nature Switzerland},
+  address = {Cham},
+  doi = {10.1007/978-3-032-38186-6_58},
+  url = {https://doi.org/10.1007/978-3-032-38186-6_58}
+}
+```
+
+### arXiv preprint
 
 ```bibtex
 @misc{aftabi2026osteoflow,
@@ -136,7 +160,7 @@ If you use OsteoFlow, please cite:
   archivePrefix = {arXiv},
   primaryClass = {cs.CV},
   doi = {10.48550/arXiv.2603.22421},
-  url = {https://www.researchgate.net/publication/403111765_OsteoFlow_Lyapunov-Guided_Flow_Distillation_for_Predicting_Bone_Remodeling_after_Mandibular_Reconstruction}
+  url = {https://arxiv.org/abs/2603.22421}
 }
 ```
 
