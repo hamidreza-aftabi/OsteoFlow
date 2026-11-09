@@ -14,6 +14,8 @@ with Lyapunov regularization. At inference time, only the student model is used.
 
 Published paper: [MICCAI 2026 / Springer](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
 
+**Status: Archived.** This repository is no longer under active development.
+
 ## News and Highlights 🎉
 
 - **August 17, 2026** - OsteoFlow was selected for a Spotlight presentation at MICCAI 2026.
@@ -66,6 +68,16 @@ Run the student model:
 python code/OsteoFlow_Student_V1.py
 ```
 
+With `LYAPUNOV_SVF_TEACHER_CHECKPOINT = None`, the student loads the highest
+numeric `teacher_epoch_*.pth` from `OsteoFlow_Teacher/checkpoints/`. Set this
+variable to a file path to override discovery; a missing override is an error.
+If no V1 epoch files exist, the legacy
+`Results/teacher_123_m100_1100_SVF_final.pth` path is used when present.
+Duplicate latest epochs require an explicit choice; incompatible or unreadable
+selected checkpoints fail without falling back to older weights. Student
+training requires the teacher in all loss modes, including `fm_only`, for
+teacher-alignment evaluation.
+
 ## Model Input and Resolution
 
 - Input volume size: `48 x 48 x 48` ROI patch.
@@ -117,8 +129,6 @@ LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
 - The teacher is used only during training; inference uses the student alone.
 
 ## Data and Checkpoints
-
-Pretrained checkpoints will be released in this repository.
 
 The dataset used in this study is internal and cannot be publicly distributed.
 Access requests may be directed to the corresponding author.
