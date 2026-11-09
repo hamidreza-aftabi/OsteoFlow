@@ -130,7 +130,7 @@ LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
 - Keep configured directory names consistent under `BASE_DIR`.
 - The teacher is used only during training; inference uses the student alone.
 
-## Data and Checkpoints
+## Data Access
 
 The dataset used in this study is internal and cannot be publicly distributed.
 Access requests may be directed to the corresponding author.
