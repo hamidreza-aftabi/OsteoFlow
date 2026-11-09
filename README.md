@@ -107,16 +107,17 @@ LOSS_MODE = 'both'  # 'both' | 'lqr_only' | 'fm_only'
   [MedVAE](https://github.com/StanfordMIMI/MedVAE) `medvae_4x_1c_3d_finetuning`
   checkpoint for CT modality using the MedVAE-recommended loss setup
   (`L1 + LPIPS + PatchGAN`); a resection-aware loss ablation was also tested.
-- **cDDPM(delta)-3D:** MONAI-based conditional DDPM conditioned on POD5,
-  trained to predict `Delta = POY1 - POD5`, and sampled with DDIM inference.
+- **cDDPM(delta)-3D:** Adapted from [CIResDiff](https://arxiv.org/abs/2408.00938).
+  MONAI-based conditional DDPM conditioned on POD5, trained to predict
+  `Delta = POY1 - POD5`, and sampled with DDIM inference.
 - **Pix2Pix-3D:** 3D POD5-to-POY1 ROI translation adapted from
   [pix2pix](https://github.com/phillipi/pix2pix), with a 3D ResUNet generator,
   3D PatchGAN discriminator, adversarial BCE loss, and `L1` reconstruction.
-- **GRIT-3D adapted:** 3D adaptation based on the GRIT paper/project page; this
+- **[GRIT-3D adapted](https://ieeexplore.ieee.org/document/10483587):** 3D adaptation based on the GRIT paper/project page; this
   is not a strict reproduction because the official code was unavailable and
   the adaptation uses reconstruction-plus-residual GAN training without the
   original style encoder pathway.
-- **SegGuidedDiff-3D adapted:** 3D POD5-to-POY1 diffusion guided by a Day-5
+- **[SegGuidedDiff-3D adapted](https://github.com/mazurowski-lab/segmentation-guided-diffusion):** 3D POD5-to-POY1 diffusion guided by a Day-5
   bone mask derived from POD5 through concatenation-based guidance; the same
   ablation mask was applied using the Day-5-derived mask.
 - **Rectified Flow:** Based on
