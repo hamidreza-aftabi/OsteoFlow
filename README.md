@@ -13,7 +13,7 @@ graft-host interface. During training, a registration-based teacher provides
 trajectory supervision, while the student learns an image-space transport field
 with Lyapunov regularization. At inference time, only the student model is used.
 
-Published paper: [MICCAI 2026 (Spotlight)](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
+Published paper: [MICCAI 2026](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
 
 **Status: Archived.** This repository is no longer under active development.
 
