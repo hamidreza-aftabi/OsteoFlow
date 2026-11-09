@@ -4,6 +4,7 @@
 [![arXiv v3](https://img.shields.io/badge/arXiv-2603.22421v3-b31b1b.svg)](https://arxiv.org/abs/2603.22421v3)
 [![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-required-EE4C2C.svg)](requirements.txt)
+[![Status](https://img.shields.io/badge/status-archived-brightgreen.svg)](#)
 
 OsteoFlow is a teacher-student framework for predicting Year-1 post-operative
 CT from Day-5 CT after mandibular reconstruction. It combines diffeomorphic
@@ -12,7 +13,7 @@ graft-host interface. During training, a registration-based teacher provides
 trajectory supervision, while the student learns an image-space transport field
 with Lyapunov regularization. At inference time, only the student model is used.
 
-Published paper: [MICCAI 2026 / Springer](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
+Published paper: [MICCAI 2026 (Spotlight)](https://doi.org/10.1007/978-3-032-38186-6_58). Preprint: [arXiv:2603.22421](https://arxiv.org/abs/2603.22421).
 
 **Status: Archived.** This repository is no longer under active development.
 
