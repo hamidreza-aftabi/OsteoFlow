@@ -69,15 +69,7 @@ Run the student model:
 python code/OsteoFlow_Student_V1.py
 ```
 
-With `LYAPUNOV_SVF_TEACHER_CHECKPOINT = None`, the student loads the highest
-numeric `teacher_epoch_*.pth` from `OsteoFlow_Teacher/checkpoints/`. Set this
-variable to a file path to override discovery; a missing override is an error.
-If no V1 epoch files exist, the legacy
-`Results/teacher_123_m100_1100_SVF_final.pth` path is used when present.
-Duplicate latest epochs require an explicit choice; incompatible or unreadable
-selected checkpoints fail without falling back to older weights. Student
-training requires the teacher in all loss modes, including `fm_only`, for
-teacher-alignment evaluation.
+Student training requires a pretrained SVF teacher checkpoint in all loss modes, including `fm_only` for evaluation. By default, the student automatically loads the latest `teacher_epoch_*.pth` checkpoint from `OsteoFlow_Teacher/checkpoints/`. To use a specific checkpoint, set `LYAPUNOV_SVF_TEACHER_CHECKPOINT` to its path.
 
 ## Model Input and Resolution
 
